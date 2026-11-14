@@ -1,0 +1,5 @@
+# Ignore results and temporary files
+results/
+*.tmp
+*.pyc
+__pycache__/
