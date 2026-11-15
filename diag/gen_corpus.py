@@ -348,18 +348,23 @@ class CorpusGenerator:
                 tasks.append((oid, level, seed, "white"))
                 tasks.append((oid, level, seed, "black"))
         
-        # Play games in parallel
+        # A CUDA model cannot safely be serialized into several spawned
+        # workers sharing one GPU. Keep GPU generation in this process;
+        # multiprocessing remains available for CPU-only generation.
         all_positions = []
-        
-        with ProcessPoolExecutor(max_workers=self.workers) as executor:
-            futures = {executor.submit(self._play_game_worker, task): task for task in tasks}
-            
-            for future in as_completed(futures):
-                try:
-                    positions = future.result()
-                    all_positions.extend(positions)
-                except Exception as e:
-                    print(f"Error in game: {e}", file=sys.stderr)
+        if self.device == "cuda":
+            for task in tasks:
+                all_positions.extend(self._play_game_worker(task))
+        else:
+            with ProcessPoolExecutor(max_workers=self.workers) as executor:
+                futures = {executor.submit(self._play_game_worker, task): task for task in tasks}
+
+                for future in as_completed(futures):
+                    try:
+                        positions = future.result()
+                        all_positions.extend(positions)
+                    except Exception as e:
+                        print(f"Error in game: {e}", file=sys.stderr)
         
         # Write to file atomically
         tmp_path = out_path.with_suffix('.tmp')
