@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
@@ -70,11 +71,17 @@ class ChessGUI:
         
         # Optional Stockfish
         self.stockfish = None
-        if STOCKFISH_AVAILABLE:
+        stockfish_path = shutil.which("stockfish")
+        if STOCKFISH_AVAILABLE and stockfish_path:
             try:
-                self.stockfish = stockfish.Stockfish()
-            except:
-                pass
+                self.stockfish = stockfish.Stockfish(path=stockfish_path)
+            except (OSError, EOFError, RuntimeError, ValueError) as exc:
+                print(f"Stockfish is unavailable: {exc}", file=sys.stderr)
+        elif STOCKFISH_AVAILABLE:
+            print(
+                "Stockfish Python package is installed, but the Stockfish engine executable was not found.",
+                file=sys.stderr,
+            )
         
         # State
         self.board = chess.Board()
@@ -559,13 +566,15 @@ def create_interface(model_path: str, device: str = "cpu"):
                     outputs=[eval_move, eval_score, eval_bar]
                 )
                 
-                if STOCKFISH_AVAILABLE:
+                if gui.stockfish is not None:
                     eval_sf_btn.click(
                         do_sf_eval,
                         outputs=[eval_move, eval_score, eval_bar]
                     )
                 else:
-                    gr.Markdown("*Stockfish not available - install with `pip install stockfish`*")
+                    gr.Markdown(
+                        "*Stockfish not available - install the Python wrapper and the Stockfish engine executable.*"
+                    )
             
             # Tab 3: Auto-Play
             with gr.Tab("Auto-Play"):

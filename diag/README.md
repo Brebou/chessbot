@@ -23,7 +23,7 @@ The GUI provides:
 - Auto-play to specific positions
 - Model self-play functionality
 
-**Note:** Stockfish is optional. If installed (`pip install stockfish`), it will be used for stronger evaluation. The built-in engine (levels 0-4) is always available.
+**Note:** Stockfish is optional. To enable it, install the Python wrapper (`uv add stockfish`) and the Stockfish engine executable, then make sure the executable is on `PATH`. The built-in engine (levels 0-4) is always available.
 
 ### Command Line Tools
 
