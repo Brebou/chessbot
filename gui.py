@@ -589,7 +589,7 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
 
                 with gr.Accordion("Auto-play & self-play", open=False):
                     with gr.Row():
-                        target_ply = gr.Slider(0, 60, value=10, step=1, label="Auto-play to ply")
+                        target_ply = gr.Slider(0, 120, value=10, step=1, label="Auto-play to ply")
                         eng_level = gr.Slider(1, 4, value=2, step=1, label="Built-in engine level")
                         auto_play_btn = gr.Button("Auto-play")
                     with gr.Row():
