@@ -550,8 +550,8 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
                 )
                 with gr.Row(elem_classes="cb-compact"):
                     model_btn = gr.Button("🤖 Model move", variant="primary", size="sm")
-                    undo_btn = gr.Button("⬅️ Undo", size="sm")
-                    redo_btn = gr.Button("➡️ Redo", size="sm")
+                    undo_btn = gr.Button("⬅️ Undo", size="sm", shortcut="left")
+                    redo_btn = gr.Button("➡️ Redo", size="sm", shortcut="right")
                     flip_btn = gr.Button("⇅ Flip", size="sm")
                     reset_btn = gr.Button("⟲ Reset", variant="stop", size="sm")
                 with gr.Row(elem_classes="cb-compact"):
