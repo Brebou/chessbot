@@ -372,13 +372,15 @@ class ChessGUI:
 
     def auto_play_to_ply(self, target_ply: int, engine_depth: int) -> None:
         with self.lock:
-            engine = Engine(level=int(engine_depth), seed=42)
-            while self.board.ply() < int(target_ply) and not self.board.is_game_over():
+            target = max(self.board.ply(), min(int(target_ply), 30))
+            level = max(1, min(int(engine_depth), 2))
+            engine = Engine(level=level, seed=42)
+            while self.board.ply() < target and not self.board.is_game_over():
                 mv = engine.best_move(self.board)
                 if mv is None:
                     break
                 self._push(mv)
-            self.msg = f"Engine auto-played to ply {self.board.ply()}."
+            self.msg = f"Engine auto-played to ply {self.board.ply()} (level {level})."
 
     def model_self_play(self, max_moves: int, annotate: bool, depth: int) -> None:
         with self.lock:
@@ -559,8 +561,8 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
 
                 with gr.Accordion("Auto-play & self-play", open=False):
                     with gr.Row():
-                        target_ply = gr.Slider(0, 60, value=10, step=1, label="Auto-play to ply")
-                        eng_level = gr.Slider(1, 4, value=2, step=1, label="Built-in engine level")
+                        target_ply = gr.Slider(0, 120, value=10, step=1, label="Auto-play to ply")
+                        eng_level = gr.Slider(1, 4, value=1, step=1, label="Built-in engine level")
                         auto_play_btn = gr.Button("Auto-play")
                     with gr.Row():
                         max_moves = gr.Slider(1, 60, value=10, step=1, label="Model self-play: plies")
