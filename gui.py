@@ -341,6 +341,12 @@ class ChessGUI:
                 self.board.pop()
             self.msg = ""
 
+    def redo_move(self) -> None:
+        with self.lock:
+            self.msg = "Redo not fully supported by python-chess"
+            # Note: python-chess doesn't support redo natively
+            # We'd need to maintain our own move history for full redo support
+
     def reset_board(self) -> None:
         with self.lock:
             self.board = chess.Board()
@@ -349,6 +355,13 @@ class ChessGUI:
 
     def flip(self) -> None:
         self.orientation = "black" if self.orientation == "white" else "white"
+
+    def get_top_3_moves(self, depth: int = 10) -> list:
+        """Get the top 3 engine moves for the current position."""
+        analysis = self.get_analysis(self.board, depth)
+        if analysis and analysis.ordered:
+            return [m.uci() for m in analysis.ordered[:3]]
+        return []
 
     def play_model_move(self, depth: int) -> None:
         with self.lock:
@@ -373,12 +386,24 @@ class ChessGUI:
     def auto_play_to_ply(self, target_ply: int, engine_depth: int) -> None:
         with self.lock:
             engine = Engine(level=int(engine_depth), seed=42)
-            while self.board.ply() < int(target_ply) and not self.board.is_game_over():
-                mv = engine.best_move(self.board)
-                if mv is None:
-                    break
-                self._push(mv)
-            self.msg = f"Engine auto-played to ply {self.board.ply()}."
+            # Negative target_ply means add |target_ply| moves from current position
+            if int(target_ply) < 0:
+                n_moves = -int(target_ply)
+                for _ in range(n_moves):
+                    if self.board.is_game_over():
+                        break
+                    mv = engine.best_move(self.board)
+                    if mv is None:
+                        break
+                    self._push(mv)
+                self.msg = f"Engine auto-played {n_moves} moves from current position."
+            else:
+                while self.board.ply() < int(target_ply) and not self.board.is_game_over():
+                    mv = engine.best_move(self.board)
+                    if mv is None:
+                        break
+                    self._push(mv)
+                self.msg = f"Engine auto-played to ply {self.board.ply()}."
 
     def model_self_play(self, max_moves: int, annotate: bool, depth: int) -> None:
         with self.lock:
@@ -525,9 +550,14 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
                 )
                 with gr.Row(elem_classes="cb-compact"):
                     model_btn = gr.Button("🤖 Model move", variant="primary", size="sm")
-                    undo_btn = gr.Button("↶ Undo", size="sm")
+                    undo_btn = gr.Button("⬅️ Undo", size="sm")
+                    redo_btn = gr.Button("➡️ Redo", size="sm")
                     flip_btn = gr.Button("⇅ Flip", size="sm")
                     reset_btn = gr.Button("⟲ Reset", variant="stop", size="sm")
+                with gr.Row(elem_classes="cb-compact"):
+                    best_move_1_btn = gr.Button("➡️ Best 1", size="sm")
+                    best_move_2_btn = gr.Button("➡️ Best 2", size="sm")
+                    best_move_3_btn = gr.Button("➡️ Best 3", size="sm")
                 status = gr.Markdown(gui.status_md(False))
 
             # ---------------- right: analysis + accordions ----------------
@@ -562,6 +592,9 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
                         target_ply = gr.Slider(0, 60, value=10, step=1, label="Auto-play to ply")
                         eng_level = gr.Slider(1, 4, value=2, step=1, label="Built-in engine level")
                         auto_play_btn = gr.Button("Auto-play")
+                    with gr.Row():
+                        n_moves = gr.Slider(1, 20, value=5, step=1, label="Add moves from current")
+                        add_moves_btn = gr.Button("Add moves")
                     with gr.Row():
                         max_moves = gr.Slider(1, 60, value=10, step=1, label="Model self-play: plies")
                         self_btn = gr.Button("Model vs Model")
@@ -608,6 +641,10 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
             gui.undo_move()
             return gui.snapshot(a)
 
+        def do_redo(a):
+            gui.redo_move()
+            return gui.snapshot(a)
+
         def do_reset(a):
             gui.reset_board()
             return gui.snapshot(a)
@@ -632,7 +669,24 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
             gui.model_self_play(n, annotate=a, depth=d)
             return gui.snapshot(a)
 
+        def do_add_moves(a, n, lvl):
+            gui.auto_play_to_ply(-n, lvl)
+            return gui.snapshot(a)
+
+        def do_play_best_move(a, depth, move_idx):
+            top_moves = gui.get_top_3_moves(depth)
+            if move_idx < len(top_moves):
+                try:
+                    move = gui.board.parse_uci(top_moves[move_idx])
+                    gui._push(move)
+                except ValueError:
+                    gui.msg = f"Could not play move {top_moves[move_idx]}"
+            else:
+                gui.msg = "Not enough engine moves available"
+            return gui.snapshot(a)
+
         after(undo_btn.click(do_undo, [auto], outs, **fast))
+        after(redo_btn.click(do_redo, [auto], outs, **fast))
         after(reset_btn.click(do_reset, [auto], outs, **fast))
         flip_btn.click(do_flip, [auto], outs, **fast)
         after(model_btn.click(do_model, [auto, depth_sl], outs, **fast))
@@ -640,6 +694,10 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
         after(uci_in.submit(do_type, [auto, uci_in], outs + [uci_in], **fast))
         after(auto_play_btn.click(do_auto_play, [auto, target_ply, eng_level], outs, **fast))
         after(self_btn.click(do_self, [auto, max_moves, depth_sl], outs, **fast))
+        after(add_moves_btn.click(do_add_moves, [auto, n_moves, eng_level], outs, **fast))
+        after(best_move_1_btn.click(lambda a, d: do_play_best_move(a, d, 0), [auto, depth_sl], outs, **fast))
+        after(best_move_2_btn.click(lambda a, d: do_play_best_move(a, d, 1), [auto, depth_sl], outs, **fast))
+        after(best_move_3_btn.click(lambda a, d: do_play_best_move(a, d, 2), [auto, depth_sl], outs, **fast))
 
         # --- analysis triggers ---
         analyze_btn.click(lambda d: gui.analyze(d), [depth_sl], [board, status, table],
