@@ -34,8 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from chess_hw import ChessTokenizer, Engine, load_model
 from chess_hw.play import ModelPlayer
 
-from .common import ProbePlayer, replay, material_value, material_diff, phase, jsonl_read, jsonl_write
-from .see import see
+try:
+    from .common import ProbePlayer, replay, material_value, material_diff, phase, jsonl_read, jsonl_write
+    from .see import see
+except ImportError:
+    from diag.common import ProbePlayer, replay, material_value, material_diff, phase, jsonl_read, jsonl_write
+    from diag.see import see
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,10 @@ from chess_hw import ChessTokenizer, Engine, load_model
 from chess_hw.match import select_openings, load_openings, MAX_PLIES
 from chess_hw.play import ModelPlayer
 
-from .common import ProbePlayer, replay, material_value, material_diff
+try:
+    from .common import ProbePlayer, replay, material_value, material_diff
+except ImportError:
+    from diag.common import ProbePlayer, replay, material_value, material_diff
 
 
 # ---------------------------------------------------------------------------
