@@ -241,7 +241,7 @@ def _mate1_block_worker(lines: List[str]) -> List[dict]:
                 continue
 
             board = chess.Board()
-            for uci in moves.split():
+            for uci in moves.lower().split():
                 try:
                     board.push_uci(uci)
                 except Exception:
@@ -324,7 +324,7 @@ def _promotions_block_worker(lines: List[str]) -> List[dict]:
 
             board = chess.Board()
             move_list = []
-            for uci in moves.split():
+            for uci in moves.lower().split():
                 if board.occupied_co[board.turn] & _PROMO_RANK[board.turn]:
                     safe, capture = classify_promotions(board)
                     if safe or capture:
@@ -357,7 +357,7 @@ def _captures_block_worker(lines: List[str]) -> List[dict]:
             board = chess.Board()
             move_list = []
 
-            for uci in moves.split():
+            for uci in moves.lower().split():
                 try:
                     move = board.parse_uci(uci)
 
@@ -1468,6 +1468,27 @@ class CorpusGenerator:
         return corpora
 
 
+LICHESS_NEEDED_CORPORA = {"mate1", "captures", "promotion"}
+
+
+def resolve_lichess_path(args) -> Optional[str]:
+    """Resolve the Lichess dataset path from CLI args, auto-downloading if needed."""
+    if args.no_lichess:
+        return None
+    if args.lichess:
+        return args.lichess
+    only = set(args.only.split(",")) if args.only else None
+    if only is not None and not (only & LICHESS_NEEDED_CORPORA):
+        return None
+    try:
+        from diag.common import ensure_lichess_dataset
+        return str(ensure_lichess_dataset(month=args.lichess_month))
+    except Exception as exc:
+        print(f"\u26a0\ufe0f Could not obtain Lichess dataset ({exc}); "
+              f"falling back to on-policy extraction")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate test corpora for ChessGPT")
     parser.add_argument("--model", type=str, default="base_model", help="Path to model")
@@ -1492,7 +1513,12 @@ def main():
     parser.add_argument("--out", type=str, default="results/corpus",
                         help="Output directory")
     parser.add_argument("--lichess", type=str, default=None,
-                        help="Path to Lichess dataset for extraction")
+                        help="Path to Lichess dataset (.jsonl or .jsonl.gz); "
+                             "default: auto-download to data/lichess_uci.jsonl.gz if missing")
+    parser.add_argument("--lichess-month", type=str, default="201403",
+                        help="Lichess dataset month (YYYYMM) to auto-download")
+    parser.add_argument("--no-lichess", action="store_true",
+                        help="Do not use a Lichess dataset (fall back to on-policy extraction)")
     parser.add_argument("--onpolicy", type=int, default=2000,
                         help="Number of on-policy games")
     parser.add_argument("--conversion-games", type=int, default=2000,
@@ -1517,7 +1543,7 @@ def main():
 
     # Generate all corpora
     generator.generate_all_corpora(
-        lichess_path=args.lichess,
+        lichess_path=resolve_lichess_path(args),
         n_onpolicy=args.onpolicy,
         levels=args.levels,
         out_dir=args.out,

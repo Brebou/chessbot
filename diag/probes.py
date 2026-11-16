@@ -135,7 +135,7 @@ def _p7_block_worker(args):
             moves = game.get("moves", "")
             if not moves:
                 continue
-            moves = moves.split()
+            moves = moves.lower().split()
             max_ply = min(len(moves) - 1, MODEL_MAX_MOVES - 1)
             if max_ply <= 8:
                 continue
@@ -990,17 +990,22 @@ class ProbeRunner:
 
         seen_samples: List[dict] = []
         unseen_samples: List[dict] = []
+        max_game_index = -1
 
-        def collect(samples: List[dict]) -> None:
+        def collect(samples: List[dict], split: int) -> None:
+            nonlocal max_game_index
             for s in samples:
-                if s["game_index"] < split_index:
+                max_game_index = max(max_game_index, s["game_index"])
+                if s["game_index"] < split:
                     if len(seen_samples) < n_seen:
                         seen_samples.append(s)
                 else:
                     if len(unseen_samples) < n_unseen:
                         unseen_samples.append(s)
 
-        try:
+        def scan(split: int) -> None:
+            nonlocal seen_samples, unseen_samples
+            seen_samples, unseen_samples = [], []
             if pool is None:
                 start_idx = 0
                 with open_fn(path, "rt", encoding="utf-8", errors="replace") as f:
@@ -1008,7 +1013,7 @@ class ProbeRunner:
                         lines = list(islice(f, _P7_BLOCK_LINES))
                         if not lines:
                             break
-                        collect(_p7_block_worker((start_idx, lines, positions_per_game)))
+                        collect(_p7_block_worker((start_idx, lines, positions_per_game)), split)
                         start_idx += len(lines)
                         print(f"  P7 scanned {start_idx} games "
                               f"(seen={len(seen_samples)}, unseen={len(unseen_samples)})")
@@ -1031,7 +1036,16 @@ class ProbeRunner:
                             start_idx += len(lines)
                         if not pending:
                             break
-                        collect(pending.pop(0).get())
+                        collect(pending.pop(0).get(), split)
+
+        try:
+            scan(split_index)
+            if not unseen_samples and seen_samples:
+                effective_split = int((max_game_index + 1) * 0.9)
+                print(f"\u26a0\ufe0f Dataset has {max_game_index + 1} games (< split index "
+                      f"{split_index}); using adaptive split at game {effective_split}")
+                split_index = effective_split
+                scan(split_index)
         finally:
             if local_pool is not None:
                 local_pool.terminate()
@@ -1074,6 +1088,7 @@ class ProbeRunner:
 
         metrics = {
             "split_index": split_index,
+            "total_games": max_game_index + 1,
             "seen": seen_metrics,
             "unseen": unseen_metrics,
         }
@@ -1195,7 +1210,9 @@ def main():
     parser.add_argument("--workers", type=int, default=1,
                         help="Worker processes for engine moves in game-playing probes")
     parser.add_argument("--lichess", type=str, default=None,
-                        help="Path to Lichess dataset (.jsonl or .jsonl.gz) for P7")
+                        help="Path to Lichess dataset (.jsonl or .jsonl.gz) for P7; "
+                             "default: data/lichess_uci_<month>.jsonl.gz if present "
+                             "(auto-downloaded by gen_corpus.py)")
     parser.add_argument("--split-index", type=int, default=940_000,
                         help="Game index separating seen (training) from unseen positions")
     parser.add_argument("--p7-unseen", type=int, default=10_000,
@@ -1204,9 +1221,19 @@ def main():
                         help="Target number of seen positions for P7")
     args = parser.parse_args()
 
+    lichess_path = args.lichess
+    if lichess_path is None:
+        data_dir = Path("data")
+        monthly = sorted(data_dir.glob("lichess_uci_*.jsonl.gz"))
+        legacy = data_dir / "lichess_uci.jsonl.gz"
+        if monthly:
+            lichess_path = str(monthly[-1])
+        elif legacy.exists():
+            lichess_path = str(legacy)
+
     runner = ProbeRunner(args.model, device=args.device, batch_size=args.batch_size,
                          workers=args.workers)
-    runner.run_all_probes(Path(args.corpus), Path(args.out), lichess_path=args.lichess,
+    runner.run_all_probes(Path(args.corpus), Path(args.out), lichess_path=lichess_path,
                           split_index=args.split_index, p7_unseen=args.p7_unseen,
                           p7_seen=args.p7_seen)
 
