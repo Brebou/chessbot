@@ -26,7 +26,10 @@ import chess
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from .common import material_value, material_diff, jsonl_read, jsonl_write
+try:
+    from .common import material_value, material_diff, jsonl_read, jsonl_write
+except ImportError:
+    from diag.common import material_value, material_diff, jsonl_read, jsonl_write
 
 
 @dataclass

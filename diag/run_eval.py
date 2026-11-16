@@ -14,7 +14,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from chessbot.chess_hw.match import evaluate_vs_engine
+from chess_hw.match import evaluate_vs_engine
 
 
 def main():

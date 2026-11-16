@@ -21,12 +21,15 @@ import json
 import os
 import random
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Callable
 
 import chess
 import numpy as np
+import torch
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,7 +37,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from chess_hw import ChessTokenizer, Engine, load_model
 from chess_hw.match import select_openings, load_openings, MAX_PLIES
 
-from .common import ProbePlayer, replay, material_value, material_diff
+try:
+    from .common import ProbePlayer, replay, material_value, material_diff
+except ImportError:
+    from diag.common import ProbePlayer, replay, material_value, material_diff
 
 from multiprocessing import get_context
 from chess_hw.play import MoveChoice
@@ -262,7 +268,12 @@ class CorpusGenerator:
         # Load model and create players
         self.model = load_model(str(model_path), device=device)
         self.model_player = ModelPlayer(self.model, name="model")
-        self.probe_player = ProbePlayer(self.model, self.tokenizer, batch_size=batch_size, device=device)
+        self.probe_player = ProbePlayer(
+            self.model,
+            self.tokenizer,
+            batch_size=batch_size,
+            device=torch.device(device),
+        )
         
         # Built-in engine for analysis
         self.engine = Engine(level=3, seed=42)
@@ -386,6 +397,46 @@ class CorpusGenerator:
                     all_positions.extend(positions)
                 except Exception as e:
                     print(f"Error in game: {e}", file=sys.stderr)
+
+        def show_progress(done: int, started: float) -> None:
+            total = len(tasks)
+            elapsed = time.monotonic() - started
+            rate = done / elapsed if elapsed else 0.0
+            remaining = (total - done) / rate if rate else 0.0
+            width = 30
+            filled = int(width * done / total) if total else width
+            bar = "#" * filled + "-" * (width - filled)
+            eta = f"{remaining / 60:.1f} min left" if rate else "estimating..."
+            print(
+                f"\rOn-policy games [{bar}] {done}/{total} "
+                f"({100 * done / total:.1f}%) | {rate:.2f} games/s | {eta}",
+                end="",
+                flush=True,
+            )
+
+        started = time.monotonic()
+        print(f"Starting {len(tasks)} on-policy games (device={self.device})")
+
+        # A CUDA model cannot safely be serialized into several spawned
+        # workers sharing one GPU. Keep GPU generation in this process;
+        # multiprocessing remains available for CPU-only generation.
+        all_positions = []
+        if self.device == "cuda":
+            for done, task in enumerate(tasks, start=1):
+                all_positions.extend(self._play_game_worker(task))
+                show_progress(done, started)
+        else:
+            with ProcessPoolExecutor(max_workers=self.workers) as executor:
+                futures = {executor.submit(self._play_game_worker, task): task for task in tasks}
+
+                for done, future in enumerate(as_completed(futures), start=1):
+                    try:
+                        positions = future.result()
+                        all_positions.extend(positions)
+                    except Exception as e:
+                        print(f"Error in game: {e}", file=sys.stderr)
+                    show_progress(done, started)
+        print()
         
         # Write to file atomically
         tmp_path = out_path.with_suffix('.tmp')

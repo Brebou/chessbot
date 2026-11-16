@@ -360,7 +360,7 @@ class ChessGUI:
         """Get the top 3 engine moves for the current position."""
         analysis = self.get_analysis(self.board, depth)
         if analysis and analysis.ordered:
-            return [m.uci() for m in analysis.ordered[:3]]
+            return [m.uci for m in analysis.ordered[:3]]
         return []
 
     def play_model_move(self, depth: int) -> None:
@@ -550,8 +550,8 @@ def create_interface(model_path: str, device: str = "cpu", stockfish_path: Optio
                 )
                 with gr.Row(elem_classes="cb-compact"):
                     model_btn = gr.Button("🤖 Model move", variant="primary", size="sm")
-                    undo_btn = gr.Button("⬅️ Undo", size="sm", shortcut="left")
-                    redo_btn = gr.Button("➡️ Redo", size="sm", shortcut="right")
+                    undo_btn = gr.Button("⬅️ Undo", size="sm")
+                    redo_btn = gr.Button("➡️ Redo", size="sm")
                     flip_btn = gr.Button("⇅ Flip", size="sm")
                     reset_btn = gr.Button("⟲ Reset", variant="stop", size="sm")
                 with gr.Row(elem_classes="cb-compact"):
