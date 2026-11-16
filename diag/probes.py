@@ -42,11 +42,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from chess_hw import ChessTokenizer, load_model
 
 try:
-    from .common import MAX_PLIES, ProbePlayer, jsonl_read, material_diff, material_value, replay
+    from .common import (MAX_PLIES, ProgressLine, ProbePlayer, jsonl_read,
+                         material_diff, material_value, replay)
     from .fast_engine import FastEngine, engine_best_move_task
     from .fast_probe import FastProbePlayer
 except ImportError:
-    from diag.common import MAX_PLIES, ProbePlayer, jsonl_read, material_diff, material_value, replay
+    from diag.common import (MAX_PLIES, ProgressLine, ProbePlayer, jsonl_read,
+                             material_diff, material_value, replay)
     from diag.fast_engine import FastEngine, engine_best_move_task
     from diag.fast_probe import FastProbePlayer
 
@@ -243,7 +245,12 @@ class ProbeRunner:
             m["termination"] = "unknown"
 
         active = list(range(len(matches)))
+        prog = ProgressLine(min_interval=2.0)
         while active:
+            prog.show(
+                f"Matches: {len(matches) - len(active)}/{len(matches)} finished "
+                f"| {prog.elapsed:.0f}s elapsed"
+            )
             model_idx, engine_idx = [], []
             for i in active:
                 m = matches[i]
@@ -301,6 +308,7 @@ class ProbeRunner:
 
             active = [i for i in model_idx + engine_idx if matches[i]["result"] == "*"]
 
+        prog.close()
         for m in matches:
             m["plies"] = m["board"].ply() - m["start_ply"]
 
@@ -374,10 +382,16 @@ class ProbeRunner:
         bucket_accs = defaultdict(new_acc)
 
         bs = self.fast_player.batch_size
+        prog = ProgressLine()
         for c in range(0, len(items), bs):
             chunk = items[c:c + bs]
             logits_batch = self.fast_player.last_logits(
                 [pos["history"] for pos, _ in chunk])
+            done = min(c + bs, len(items))
+            prog.show(
+                f"P1: {done}/{len(items)} positions | "
+                f"{prog.rate(done):.1f}/s | {prog.eta(done, len(items))}"
+            )
 
             for (pos, board), logits in zip(chunk, logits_batch):
                 probs = np.exp(logits - logits.max())
@@ -422,6 +436,8 @@ class ProbeRunner:
                     total_acc[f] += s[f]
                     for name in names:
                         bucket_accs[name][f] += s[f]
+
+        prog.close()
 
         def finalize(acc: dict) -> dict:
             count = acc["count"]
@@ -483,9 +499,15 @@ class ProbeRunner:
         check_not_mate = 0
 
         bs = self.fast_player.batch_size
+        prog = ProgressLine()
         for c in range(0, len(items), bs):
             chunk = items[c:c + bs]
             logits_batch = self.fast_player.last_logits([h for h, _, _ in chunk])
+            done = min(c + bs, len(items))
+            prog.show(
+                f"P2: {done}/{len(items)} positions | "
+                f"{prog.rate(done):.1f}/s | {prog.eta(done, len(items))}"
+            )
 
             for (history, board, mates), logits in zip(chunk, logits_batch):
                 top_indices = np.argsort(logits)[::-1][:3]
@@ -508,6 +530,7 @@ class ProbeRunner:
                             check_not_mate += 1
                             break
 
+        prog.close()
         total = len(items)
         elapsed = time.time() - start_time
         print(f"✅ P2 completed in {elapsed:.2f}s")
@@ -567,10 +590,18 @@ class ProbeRunner:
 
         choices = []
         bs = self.fast_player.batch_size
+        prog = ProgressLine()
         for c in range(0, len(items), bs):
             chunk = items[c:c + bs]
             choices.extend(self.fast_player.choose_from_histories(
                 [it["history"] for it in chunk], [it["board"] for it in chunk]))
+            done = min(c + bs, len(items))
+            prog.show(
+                f"P3: {done}/{len(items)} positions | "
+                f"{prog.rate(done):.1f}/s | {prog.eta(done, len(items))}"
+            )
+
+        prog.close()
 
         n_winning = n_losing = n_free = 0
         take_winning = take_losing = take_free = 0
@@ -630,8 +661,14 @@ class ProbeRunner:
         total = 0
         block_size = 512
 
+        prog = ProgressLine()
         for block_start in range(0, len(positions), block_size):
             block = positions[block_start:block_start + block_size]
+            done = min(block_start + block_size, len(positions))
+            prog.show(
+                f"P4: {done}/{len(positions)} positions | "
+                f"{prog.rate(done):.1f}/s | {prog.eta(done, len(positions))}"
+            )
             boards, histories, idxs = [], [], []
             for i, pos in enumerate(block):
                 try:
@@ -677,6 +714,7 @@ class ProbeRunner:
                 if mat_loss >= 300:
                     hang_3pt += 1
 
+        prog.close()
         elapsed = time.time() - start_time
         print(f"✅ P4 completed in {elapsed:.2f}s")
 
@@ -909,9 +947,17 @@ class ProbeRunner:
 
         choices = []
         bs = self.fast_player.batch_size
+        prog = ProgressLine()
         for c in range(0, len(boards), bs):
             choices.extend(self.fast_player.choose_from_histories(
                 histories[c:c + bs], boards[c:c + bs]))
+            done = min(c + bs, len(boards))
+            prog.show(
+                f"P6b: {done}/{len(boards)} positions | "
+                f"{prog.rate(done):.1f}/s | {prog.eta(done, len(boards))}"
+            )
+
+        prog.close()
 
         n_safe = 0
         queen_when_safe = 0
@@ -1006,6 +1052,16 @@ class ProbeRunner:
         def scan(split: int) -> None:
             nonlocal seen_samples, unseen_samples
             seen_samples, unseen_samples = [], []
+            prog = ProgressLine(min_interval=2.0)
+
+            def show(idx: int) -> None:
+                prog.show(
+                    f"P7 scan: {idx:,} games | "
+                    f"seen={len(seen_samples):,}/{n_seen:,} | "
+                    f"unseen={len(unseen_samples):,}/{n_unseen:,} | "
+                    f"{prog.rate(idx):,.0f} games/s"
+                )
+
             if pool is None:
                 start_idx = 0
                 with open_fn(path, "rt", encoding="utf-8", errors="replace") as f:
@@ -1015,8 +1071,7 @@ class ProbeRunner:
                             break
                         collect(_p7_block_worker((start_idx, lines, positions_per_game)), split)
                         start_idx += len(lines)
-                        print(f"  P7 scanned {start_idx} games "
-                              f"(seen={len(seen_samples)}, unseen={len(unseen_samples)})")
+                        show(start_idx)
             else:
                 window = max(1, self.workers) * 4
                 pending = []
@@ -1037,6 +1092,11 @@ class ProbeRunner:
                         if not pending:
                             break
                         collect(pending.pop(0).get(), split)
+                        show(start_idx)
+
+            prog.close()
+            print(f"  P7 scanned {start_idx:,} games "
+                  f"(seen={len(seen_samples):,}, unseen={len(unseen_samples):,})")
 
         try:
             scan(split_index)

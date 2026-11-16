@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -402,6 +403,59 @@ def jsonl_write(path: Union[str, Path], rows: List[dict]) -> None:
     
     # Atomic rename
     os.replace(tmp_path, path)
+
+
+class ProgressLine:
+    """Time-throttled single-line progress display for long-running scans.
+
+    Usage:
+        prog = ProgressLine()
+        for i, item in enumerate(items):
+            ...
+            prog.show(f"{i}/{len(items)} done | {prog.rate(i):.1f}/s | {prog.eta(i, len(items))}")
+        prog.close()
+    """
+
+    def __init__(self, min_interval: float = 1.0):
+        self.min_interval = min_interval
+        self.started = time.monotonic()
+        self._last = 0.0
+
+    def show(self, message: str, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last < self.min_interval:
+            return
+        self._last = now
+        print(f"\r{message}", end="", flush=True)
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def rate(self, done: int) -> float:
+        return done / max(self.elapsed, 1e-9)
+
+    def eta(self, done: int, total: int) -> str:
+        rate = self.rate(done)
+        if rate <= 0:
+            return "estimating..."
+        remaining = (total - done) / rate
+        if remaining >= 90:
+            return f"{remaining / 60:.1f} min left"
+        return f"{remaining:.0f}s left"
+
+    def close(self) -> None:
+        if self._last:
+            print()
+
+
+def count_jsonl_rows(path: Union[str, Path]) -> int:
+    """Count non-empty lines in a JSONL file (0 if missing/unreadable)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
 
 
 LICHESS_DATA_DIR = Path("data")

@@ -117,6 +117,15 @@ Notes:
   `SKIPPED` in `probes_base.json`). `probes.py` reuses the downloaded file
   automatically for P7 (training dataset preferred). If the dataset has fewer games
   than the split index, P7 falls back to an adaptive 90/10 split.
+- **Progress & caching:** every data-computing stage displays a throttled one-line
+  progress bar (games/positions scanned, rate, ETA) — including the Lichess
+  extraction scans, the on-policy/conversion/promotion scans, all probe batches
+  (P1-P4, P6b), match playing (P5/P6) and the P7 dataset scan. `gen_corpus.py`
+  also skips regeneration when a corpus file already exists with the expected
+  row count (`mate1` >= 5000 and `captures` >= 20000 rows with a Lichess
+  dataset, `promotion` >= target; on-policy/endgames/conversion just need to be
+  non-empty since their yield legitimately varies). Delete a corpus file (or run
+  with a smaller target) to force regeneration.
 - `fast_engine.py` (optimized engine, move-identical to `chess_hw.engine.Engine`) and
   `fast_probe.py` (last-position batched logits, bit-identical to `ProbePlayer._batch_logits`)
   are used by the pipeline for speed; `chess_hw/` itself is never modified.
