@@ -50,11 +50,33 @@ class ProbePlayer:
                  batch_size: int = 64, device: Optional[str] = None):
         self.model = model.eval()
         self.tokenizer = tokenizer
-        self.batch_size = batch_size
         self.device = device or next(model.parameters()).device
+        
+        # Auto-detect GPU and set optimal batch size
+        if self.device.type == 'cuda':
+            # For GPU, use much larger batch sizes to maximize utilization
+            # Model has ~946K params, each forward pass with batch B uses:
+            # - Input: B * 256 * 4 bytes (int64)
+            # - Model params: ~3.8 MB (float32)
+            # - Output: B * vocab_size * 4 bytes (float32) = B * 1971 * 4
+            # - Activations: ~B * 256 * 128 * 4 (hidden states)
+            # Total per batch: ~B * (256*4 + 1971*4 + 256*128*4) = B * ~135 KB
+            # With 8GB GPU, we can fit batch of ~60K, but practical limit is lower
+            # Use 1024 as default for GPU (can be increased based on available memory)
+            self.batch_size = batch_size if batch_size > 64 else 1024
+        else:
+            # For CPU, keep smaller batch size
+            self.batch_size = batch_size
+        
+        print(f"ProbePlayer initialized: device={self.device}, batch_size={self.batch_size}")
         
     def _batch_logits(self, histories: List[List[str]]) -> np.ndarray:
         """Compute logits for a batch of histories.
+        
+        Optimized for GPU:
+        - Keeps all tensors on GPU device
+        - Minimizes CPU-GPU transfers
+        - Processes in batches for memory efficiency
         
         Args:
             histories: List of move histories (each is a list of UCI strings)
@@ -65,38 +87,82 @@ class ProbePlayer:
         if not histories:
             return np.array([]).reshape(0, self.tokenizer.vocab_size)
         
-        # Sort by length for efficient batching (causal attention allows padding)
-        sorted_indices = np.argsort([len(h) for h in histories])[::-1]
-        sorted_histories = [histories[i] for i in sorted_indices]
+        n_histories = len(histories)
         
-        # Encode all histories
-        all_ids = []
-        for h in sorted_histories:
-            ids = self.tokenizer.encode(h, add_bos=True)
-            all_ids.append(ids)
+        # Process in batches to avoid OOM and maximize GPU utilization
+        all_logits = []
         
-        # Pad to same length
-        max_len = max(len(ids) for ids in all_ids)
-        assert max_len <= MAX_CONTEXT, f"History length {max_len} exceeds context {MAX_CONTEXT}"
+        for batch_start in range(0, n_histories, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, n_histories)
+            batch_histories = histories[batch_start:batch_end]
+            
+            # Sort by length for efficient batching (causal attention allows padding)
+            sorted_indices = np.argsort([len(h) for h in batch_histories])[::-1]
+            sorted_histories = [batch_histories[i] for i in sorted_indices]
+            
+            # Encode all histories
+            all_ids = []
+            for h in sorted_histories:
+                ids = self.tokenizer.encode(h, add_bos=True)
+                all_ids.append(ids)
+            
+            # Pad to same length
+            max_len = max(len(ids) for ids in all_ids)
+            assert max_len <= MAX_CONTEXT, f"History length {max_len} exceeds context {MAX_CONTEXT}"
+            
+            # Create padded tensor directly on the target device
+            padded = torch.full((len(all_ids), max_len), self.tokenizer.pad_token_id, 
+                              dtype=torch.long, device=self.device)
+            for i, ids in enumerate(all_ids):
+                padded[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=self.device)
+            
+            # Forward pass - keep everything on GPU
+            with torch.inference_mode():
+                logits = self.model(padded)  # (B, T, vocab_size)
+                # Take logits at the last non-padding position for each
+                # Compute mask on GPU
+                mask = (padded != self.tokenizer.pad_token_id)
+                last_pos = mask.sum(dim=1) - 1
+                last_logits = logits[torch.arange(len(all_ids), device=self.device), last_pos]
+            
+            # Convert to numpy only at the end
+            logits_np = last_logits.float().cpu().numpy()
+            
+            # Unsorter indices
+            unsort_indices = np.argsort(sorted_indices)
+            batch_logits = logits_np[unsort_indices]
+            
+            all_logits.append(batch_logits)
         
-        padded = torch.full((len(all_ids), max_len), self.tokenizer.pad_token_id, 
-                          dtype=torch.long, device=self.device)
-        for i, ids in enumerate(all_ids):
-            padded[i, :len(ids)] = torch.tensor(ids, device=self.device)
-        
-        # Forward pass
-        with torch.inference_mode():
-            logits = self.model(padded)  # (B, T, vocab_size)
-            # Take logits at the last non-padding position for each
-            last_logits = logits[torch.arange(len(all_ids)), (padded != self.tokenizer.pad_token_id).sum(dim=1) - 1]
-        
-        # Convert to numpy and unsort
-        logits_np = last_logits.float().cpu().numpy()
-        
-        # Reorder to original order
-        unsort_indices = np.argsort(sorted_indices)
-        return logits_np[unsort_indices]
+        # Concatenate all batches
+        return np.concatenate(all_logits, axis=0)
     
+
+    def get_batch_logits(self, histories: List[List[str]]) -> np.ndarray:
+        """Get logits for multiple histories (alias for _batch_logits).
+        
+        This is the main method for batch inference. For GPU, it will
+        automatically use large batches to maximize GPU utilization.
+        
+        Args:
+            histories: List of move histories
+            
+        Returns:
+            Array of shape (n_histories, vocab_size) with logits
+        """
+        return self._batch_logits(histories)
+    
+    @staticmethod
+    def get_gpu_memory_info() -> dict:
+        """Get GPU memory usage information (if CUDA available)."""
+        if torch.cuda.is_available():
+            return {
+                'allocated': torch.cuda.memory_allocated() / 1024 / 1024,
+                'reserved': torch.cuda.memory_reserved() / 1024 / 1024,
+                'total': torch.cuda.get_device_properties(0).total_memory / 1024 / 1024,
+            }
+        return {'allocated': 0, 'reserved': 0, 'total': 0}
+
     def get_logits(self, history: Sequence[str]) -> np.ndarray:
         """Get logits for a single history.
         

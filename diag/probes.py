@@ -76,22 +76,28 @@ class ProbeRunner:
         Args:
             model_path: Path to model directory
             device: "cpu" or "cuda"
-            batch_size: Batch size for inference
+            batch_size: Batch size for inference (auto-adjusted for GPU)
         """
         self.model_path = Path(model_path)
         self.device = device
-        self.batch_size = batch_size
+        
+        # Auto-adjust batch size for GPU
+        if device == "cuda" or (device is not None and "cuda" in device):
+            # For GPU, use large batch sizes to maximize utilization
+            self.batch_size = max(batch_size, 1024)
+        else:
+            self.batch_size = batch_size
         
         # Load model and tokenizer
         self.model = load_model(str(model_path), device=device)
         self.tokenizer = ChessTokenizer()
         self.probe_player = ProbePlayer(self.model, self.tokenizer, 
-                                       batch_size=batch_size, device=device)
+                                       batch_size=self.batch_size, device=device)
         
         # Built-in engine for analysis
         self.engine = Engine(level=3, seed=42)
         
-        print(f"✅ ProbeRunner initialized with device={device}, batch_size={batch_size}")
+        print(f"✅ ProbeRunner initialized with device={device}, batch_size={self.batch_size}")
     
     def run_probe_p1(self, corpus_path: Path, out_dir: Path) -> ProbeResult:
         """P1: Legality, mass on legal moves (C1, C2, C3, C14)
@@ -564,7 +570,7 @@ def main():
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
                         help="Device for model")
     parser.add_argument("--batch_size", type=int, default=64,
-                        help="Batch size for inference")
+                        help="Batch size for inference (auto-set to 1024 for GPU)")
     args = parser.parse_args()
     
     # Create runner
