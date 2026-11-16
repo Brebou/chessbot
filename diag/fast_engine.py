@@ -124,6 +124,7 @@ class FastEngine:
             raise ValueError("level must be in 0..4")
         self.level = level
         self.qdepth = qdepth
+        self.seed = seed
         self.rng = random.Random(seed)
         self.nodes = 0
         self._tt: dict = {}
@@ -254,7 +255,12 @@ class FastEngine:
         if not moves:
             return None
         if self.level == 0:
-            return self.rng.choice(sorted(moves, key=lambda m: m.uci()))
+            # Stateless random choice: the move depends only on (seed, fen),
+            # never on how many calls this engine instance served before.
+            # (The fullmove counter makes the FEN unique within a game, so a
+            # position never repeats the same random move.)
+            return random.Random(f"{self.seed}-{board.fen()}").choice(
+                sorted(moves, key=lambda m: m.uci()))
         score = evaluate_white_pov(board)
         best, best_score = moves[0], -MATE - 1
         alpha, beta = -MATE - 1, MATE + 1
