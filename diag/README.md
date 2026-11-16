@@ -72,6 +72,47 @@ legal_probs = probe.get_legal_probs(history, board)
 5. **Auto-play / self-play**: engine plays to a target ply; model plays against itself
 6. **Position info**: FEN, move history and full game state (collapsed by default)
 
+### Command Line Tools
+
+The `diag/` package includes:
+
+- `common.py`: Core utilities including `ProbePlayer` for accessing full model logits
+- `gui.py`: Single-page graphical interface for testing
+- `board_component.py`: Drag-and-drop board widget (HTML/JS used by the GUI)
+- `__init__.py`: Package initialization
+
+## Diagnostic Pipeline (C1-C14)
+
+The full capability profile is produced by five CLI stages (all support `--help`):
+
+```bash
+# 1. Corpora (on-policy games, mate1, captures, endgames, conversion, promotion)
+uv run diag/gen_corpus.py --model base_model --out results/corpus --workers 4
+# 2. Probes P1-P7 (P7 needs a Lichess dataset: --lichess data.jsonl.gz)
+uv run diag/probes.py --model base_model --corpus results/corpus --out results/probes --workers 4
+# 3. Multi-seed evaluation vs the engine (C4)
+uv run diag/run_eval.py --model base_model --seeds 0 1 --levels 0 1 2 3 --n_openings 50 --workers 4 --out results/eval_base --games_out
+# 4. Game analysis (C4 by level, C8 fallback, C11 repetitions, C12 variance)
+uv run diag/analyze_games.py --games results/eval_base --out results/analysis
+# 5. Capability profile report
+uv run diag/report.py --eval results/eval_base --analysis results/analysis --probes results/probes --out results/profile
+```
+
+Outputs: `results/corpus/*.jsonl` + `manifest.json`, `results/probes/probes_base.json`,
+`results/eval_base/summary.json` + per-seed game files, `results/analysis/analysis_base.json`,
+and `results/profile/profile.md` + `profile.json`.
+
+Notes:
+
+- Without a Lichess dataset, `mate1` and `captures` corpora fall back to scanning the
+  on-policy games, and P7 (C13) is recorded as `SKIPPED` in `probes_base.json`.
+- `fast_engine.py` (optimized engine, move-identical to `chess_hw.engine.Engine`) and
+  `fast_probe.py` (last-position batched logits, bit-identical to `ProbePlayer._batch_logits`)
+  are used by the pipeline for speed; `chess_hw/` itself is never modified.
+- All stages are seeded and deterministic: running the probes twice yields identical output.
+- `tests/` contains SEE unit tests (`test_see.py`) and corpus validation (`test_corpus.py`,
+  override the corpus directory with `CHESSBOT_CORPUS_DIR`).
+
 ## Requirements
 
 - Python >= 3.11

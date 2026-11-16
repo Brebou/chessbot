@@ -49,7 +49,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from chess_hw import ChessTokenizer, load_model
 from chess_hw.match import load_openings, MAX_PLIES
 
-from diag.fast_engine import engine_best_move_task
+from diag.common import jsonl_read, jsonl_write, material_diff, replay
+from diag.fast_engine import FastEngine, engine_best_move_task
 from diag.fast_probe import FastProbePlayer
 from diag.see import see as see_func
 
@@ -267,6 +268,77 @@ def _mate1_block_worker(lines: List[str]) -> List[dict]:
                         "mates": mates,
                         "source": "lichess",
                     })
+        except Exception:
+            continue
+    return positions
+
+
+_PROMO_RANK = {chess.WHITE: chess.BB_RANK_7, chess.BLACK: chess.BB_RANK_2}
+
+
+def _quiet_promotion_safe(board: chess.Board, move: chess.Move) -> bool:
+    """A quiet promotion is safe when no legal opponent recapture of the
+    promoted piece wins material (every recapture has SEE <= 0)."""
+    after = board.copy(stack=False)
+    after.push(move)
+    mover = board.turn
+    for from_sq in after.attackers(not mover, move.to_square):
+        recapture = chess.Move(from_sq, move.to_square)
+        if recapture in after.legal_moves and see_func(after, recapture) > 0:
+            return False
+    return True
+
+
+def classify_promotions(board: chess.Board) -> tuple:
+    """Split the legal promotions of ``board`` into (safe, capture) UCI lists.
+
+    ``safe`` holds promotions with SEE >= 0 (including capture-promotions that
+    win the exchange); ``capture`` holds every promotion that captures. Positions
+    without a pawn on the candidate rank return two empty lists cheaply.
+    """
+    safe, capture = [], []
+    if not (board.occupied_co[board.turn] & _PROMO_RANK[board.turn]):
+        return safe, capture
+    for move in board.legal_moves:
+        if not move.promotion:
+            continue
+        uci = move.uci()
+        if board.is_capture(move):
+            capture.append(uci)
+            if see_func(board, move) >= 0:
+                safe.append(uci)
+        elif _quiet_promotion_safe(board, move):
+            safe.append(uci)
+    return safe, capture
+
+
+def _promotions_block_worker(lines: List[str]) -> List[dict]:
+    """Extract promotion-opportunity positions from a block of raw JSONL game lines."""
+    positions = []
+    for line in lines:
+        try:
+            game = json.loads(line)
+            moves = game.get('moves', '')
+            if not moves:
+                continue
+
+            board = chess.Board()
+            move_list = []
+            for uci in moves.split():
+                if board.occupied_co[board.turn] & _PROMO_RANK[board.turn]:
+                    safe, capture = classify_promotions(board)
+                    if safe or capture:
+                        positions.append({
+                            "fen": board.fen(),
+                            "history": list(move_list),
+                            "ply": board.ply(),
+                            "safe_promotions": safe,
+                            "capture_promotions": capture,
+                            "model_color": "white" if board.turn == chess.WHITE else "black",
+                            "source": "lichess",
+                        })
+                board.push_uci(uci)
+                move_list.append(uci)
         except Exception:
             continue
     return positions
@@ -551,6 +623,439 @@ class CorpusGenerator:
         print(f"\u2705 Generated {len(all_positions)} on-policy positions")
         return out_path
 
+    # -- conversion / promotion corpora -------------------------------------
+
+    def _finish_game(self, game: dict) -> None:
+        """Fill the final result fields of a game dict once its board is over."""
+        board = game["board"]
+        outcome = board.outcome(claim_draw=False)
+        if outcome is None:
+            game["result"], game["termination"] = "1/2-1/2", "max_plies"
+        else:
+            game["result"] = outcome.result()
+            game["termination"] = outcome.termination.name.lower()
+
+    def generate_conversion_positions(
+        self,
+        n_games: int = 2000,
+        thresholds: List[int] = (2, 3, 5, 9),
+        min_per_threshold: int = 300,
+        engine_level: int = 1,
+        quiesce_level: int = 2,
+        seed: int = 0,
+        out_dir: str = "results/corpus",
+    ) -> Path:
+        """Generate conversion positions (C8): first ply where the model's
+        material advantage reaches each threshold.
+
+        Games are played model vs engine in lockstep rounds (same scheduler as
+        on-policy generation). At every model turn, when the raw material
+        advantage first reaches an unrecorded threshold, the advantage is
+        confirmed by a short quiescence probe (model's greedy move followed by
+        an engine reply at ``quiesce_level``); if the advantage survives, the
+        position (model to move) is recorded for that threshold.
+
+        Args:
+            n_games: Number of games to play
+            thresholds: Material advantage thresholds (in pawns)
+            min_per_threshold: Stop early once each threshold has this many positions
+            engine_level: Engine level for the game opponent
+            quiesce_level: Engine level used for the quiescence confirmation
+            seed: Random seed
+            out_dir: Output directory
+
+        Returns:
+            Path to probe_conversion.jsonl
+        """
+        out_path = Path(out_dir) / "probe_conversion.jsonl"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        thresholds = sorted(thresholds)
+        rng = random.Random(f"conversion-{seed}")
+        openings = load_openings()
+
+        games = []
+        for k in range(n_games):
+            opening_idx = rng.randrange(len(openings))
+            model_color = "white" if k % 2 == 0 else "black"
+            board = chess.Board()
+            for uci in openings[opening_idx]:
+                board.push_uci(uci)
+            games.append({
+                "board": board,
+                "history": [m.uci() for m in board.move_stack],
+                "model_color": model_color,
+                "opening_idx": opening_idx,
+                "level": engine_level,
+                "engine_seed": f"engine-conversion-{seed}-{opening_idx}-{model_color}",
+                "recorded": set(),
+                "positions": [],
+                "result": "*",
+                "termination": "unknown",
+            })
+
+        counts = {t: 0 for t in thresholds}
+        seen = set()
+        all_positions: List[dict] = []
+        pool = self._make_engine_pool()
+        started = time.monotonic()
+
+        def finalize(game: dict) -> None:
+            for pos in game["positions"]:
+                pos["original_result"] = game["result"]
+                pos["original_termination"] = game["termination"]
+            all_positions.extend(game["positions"])
+
+        try:
+            active = list(range(len(games)))
+            while active:
+                if all(counts[t] >= min_per_threshold for t in thresholds):
+                    for i in active:
+                        finalize(games[i])
+                    break
+
+                model_idx, engine_idx = [], []
+                for i in active:
+                    g = games[i]
+                    b = g["board"]
+                    if b.is_game_over() or b.ply() >= MAX_PLIES:
+                        self._finish_game(g)
+                        finalize(g)
+                        continue
+                    if (b.turn == chess.WHITE) == (g["model_color"] == "white"):
+                        model_idx.append(i)
+                    else:
+                        engine_idx.append(i)
+
+                engine_results = None
+                if engine_idx:
+                    tasks = [
+                        (games[i]["board"].fen(), games[i]["level"], games[i]["engine_seed"])
+                        for i in engine_idx
+                    ]
+                    if pool is not None:
+                        chunksize = max(1, len(tasks) // (self.workers * 4))
+                        engine_results = pool.imap(
+                            engine_best_move_task, tasks, chunksize=chunksize
+                        )
+                    else:
+                        engine_results = [engine_best_move_task(t) for t in tasks]
+
+                bs = self.probe_player.batch_size
+                for c in range(0, len(model_idx), bs):
+                    chunk = model_idx[c:c + bs]
+                    choices = self.probe_player.choose_for_boards(
+                        [games[i]["board"] for i in chunk]
+                    )
+                    for i, choice in zip(chunk, choices):
+                        g = games[i]
+                        b = g["board"]
+                        color = chess.WHITE if g["model_color"] == "white" else chess.BLACK
+                        move, attempt = choice.move, choice.attempt
+                        if move is None:
+                            legal = list(b.legal_moves)
+                            if not legal:
+                                continue
+                            move = random.Random(
+                                f"fallback-{g['opening_idx']}-{b.ply()}"
+                            ).choice(legal)
+                            attempt = 0
+
+                        raw_diff = material_diff(b, color)
+                        pending = [
+                            t for t in thresholds
+                            if t not in g["recorded"]
+                            and counts[t] < min_per_threshold
+                            and raw_diff >= t
+                        ]
+                        if pending:
+                            qb = b.copy(stack=False)
+                            qb.push(move)
+                            q_engine = FastEngine(
+                                level=quiesce_level,
+                                seed=f"quiesce-{g['engine_seed']}-{b.ply()}",
+                            )
+                            q_move = q_engine.best_move(qb)
+                            if q_move is not None:
+                                qb.push(q_move)
+                            q_diff = material_diff(qb, color)
+                            key = tuple(g["history"])
+                            for t in pending:
+                                if q_diff >= t and (key, t) not in seen:
+                                    seen.add((key, t))
+                                    g["recorded"].add(t)
+                                    counts[t] += 1
+                                    g["positions"].append({
+                                        "fen": b.fen(),
+                                        "history": list(g["history"]),
+                                        "ply": b.ply(),
+                                        "threshold": t,
+                                        "model_color": g["model_color"],
+                                        "original_result": None,
+                                        "original_termination": None,
+                                        "source": "onpolicy",
+                                    })
+
+                        uci = move.uci()
+                        b.push(move)
+                        g["history"].append(uci)
+
+                if engine_results is not None:
+                    ucis = list(engine_results)
+                    for i, uci in zip(engine_idx, ucis):
+                        if uci:
+                            g = games[i]
+                            g["board"].push_uci(uci)
+                            g["history"].append(uci)
+
+                still_active = []
+                for i in model_idx + engine_idx:
+                    g = games[i]
+                    b = g["board"]
+                    if b.is_game_over() or b.ply() >= MAX_PLIES:
+                        self._finish_game(g)
+                        finalize(g)
+                    else:
+                        still_active.append(i)
+                active = still_active
+
+                done = sum(min(counts[t], min_per_threshold) for t in thresholds)
+                total = min_per_threshold * len(thresholds)
+                elapsed = time.monotonic() - started
+                print(
+                    f"\rConversion games: {done}/{total} target positions "
+                    f"({{}} games left) | {elapsed:.0f}s".format(len(active)),
+                    end="",
+                    flush=True,
+                )
+        finally:
+            if pool is not None:
+                pool.terminate()
+        print()
+
+        jsonl_write(out_path, all_positions)
+        print(f"\u2705 Generated {len(all_positions)} conversion positions "
+              f"({{}})".format(", ".join(f"+{t}: {counts[t]}" for t in thresholds)))
+        return out_path
+
+    def generate_promotion_positions(
+        self,
+        target: int = 1000,
+        lichess_path: Optional[str] = None,
+        seed: int = 0,
+        n_fallback_games: int = 4000,
+        max_onpolicy_scan: int = 50000,
+        out_dir: str = "results/corpus",
+    ) -> Path:
+        """Generate promotion-opportunity positions (C10).
+
+        Sources, in order (stopping when ``target`` is reached):
+          1. positions already generated on-policy this run,
+          2. the Lichess dataset (if provided), scanned for positions where
+             the side to move has a pawn on its 7th rank,
+          3. dedicated fast games vs the level-0 engine, scanning every
+             position of every game for promotion opportunities.
+
+        Each record: {history, fen, ply, safe_promotions, capture_promotions,
+        model_color, source}.
+
+        Returns:
+            Path to probe_promotion.jsonl
+        """
+        out_path = Path(out_dir) / "probe_promotion.jsonl"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        positions: List[dict] = []
+        seen = set()
+
+        def add(pos: dict) -> None:
+            key = tuple(pos["history"])
+            if key in seen:
+                return
+            seen.add(key)
+            positions.append(pos)
+
+        onpolicy_path = Path(out_dir) / "onpolicy_positions.jsonl"
+        if onpolicy_path.exists():
+            scanned = 0
+            for pos in jsonl_read(onpolicy_path):
+                if len(positions) >= target or scanned >= max_onpolicy_scan:
+                    break
+                scanned += 1
+                try:
+                    board = chess.Board()
+                    for uci in pos["history"]:
+                        board.push_uci(uci)
+                except Exception:
+                    continue
+                if not (board.occupied_co[board.turn] & _PROMO_RANK[board.turn]):
+                    continue
+                safe, capture = classify_promotions(board)
+                if safe or capture:
+                    add({
+                        "fen": board.fen(),
+                        "history": list(pos["history"]),
+                        "ply": board.ply(),
+                        "safe_promotions": safe,
+                        "capture_promotions": capture,
+                        "model_color": "white" if board.turn == chess.WHITE else "black",
+                        "source": "onpolicy",
+                    })
+            print(f"   promotions from on-policy scan: {len(positions)}")
+
+        if lichess_path and len(positions) < target:
+            extra = self._extract_parallel(
+                lichess_path, _promotions_block_worker, target - len(positions), "promotions"
+            )
+            for pos in extra:
+                add(pos)
+            print(f"   promotions after Lichess scan: {len(positions)}")
+
+        if len(positions) < target:
+            missing = target - len(positions)
+            print(f"   playing {n_fallback_games} fast promotion-scan games "
+                  f"(need {missing} more positions)")
+            for pos in self._promotion_scan_games(
+                n_fallback_games, missing, seed, seen, out_dir
+            ):
+                add(pos)
+            print(f"\u2705 Generated {len(positions)} promotion positions")
+        else:
+            print(f"\u2705 Generated {len(positions)} promotion positions")
+
+        jsonl_write(out_path, positions)
+        return out_path
+
+    def _promotion_scan_games(self, n_games: int, needed: int, seed: int,
+                              exclude: set, out_dir: str) -> List[dict]:
+        """Play fast games vs the level-0 engine and record every position
+        (either side to move) where a promotion is available, until ``needed``
+        new positions have been collected."""
+        if needed <= 0:
+            return []
+
+        rng = random.Random(f"promotion-{seed}")
+        openings = load_openings()
+        games = []
+        for k in range(n_games):
+            opening_idx = rng.randrange(len(openings))
+            model_color = "white" if k % 2 == 0 else "black"
+            board = chess.Board()
+            for uci in openings[opening_idx]:
+                board.push_uci(uci)
+            games.append({
+                "board": board,
+                "history": [m.uci() for m in board.move_stack],
+                "model_color": model_color,
+                "opening_idx": opening_idx,
+                "level": 0,
+                "engine_seed": f"engine-promotion-{seed}-{opening_idx}-{model_color}",
+            })
+
+        found: List[dict] = []
+        found_keys = set(exclude)
+        pool = self._make_engine_pool()
+        started = time.monotonic()
+
+        def scan(game: dict) -> None:
+            b = game["board"]
+            if not (b.occupied_co[b.turn] & _PROMO_RANK[b.turn]):
+                return
+            key = tuple(game["history"])
+            if key in found_keys:
+                return
+            safe, capture = classify_promotions(b)
+            if safe or capture:
+                found_keys.add(key)
+                found.append({
+                    "fen": b.fen(),
+                    "history": list(game["history"]),
+                    "ply": b.ply(),
+                    "safe_promotions": safe,
+                    "capture_promotions": capture,
+                    "model_color": "white" if b.turn == chess.WHITE else "black",
+                    "source": "generated",
+                })
+
+        try:
+            active = list(range(len(games)))
+            while active and len(found) < needed:
+                model_idx, engine_idx = [], []
+                for i in active:
+                    g = games[i]
+                    b = g["board"]
+                    if b.is_game_over() or b.ply() >= MAX_PLIES:
+                        continue
+                    if (b.turn == chess.WHITE) == (g["model_color"] == "white"):
+                        model_idx.append(i)
+                    else:
+                        engine_idx.append(i)
+
+                for i in model_idx + engine_idx:
+                    scan(games[i])
+                if len(found) >= needed:
+                    break
+
+                engine_results = None
+                if engine_idx:
+                    tasks = [
+                        (games[i]["board"].fen(), games[i]["level"], games[i]["engine_seed"])
+                        for i in engine_idx
+                    ]
+                    if pool is not None:
+                        chunksize = max(1, len(tasks) // (self.workers * 4))
+                        engine_results = pool.imap(
+                            engine_best_move_task, tasks, chunksize=chunksize
+                        )
+                    else:
+                        engine_results = [engine_best_move_task(t) for t in tasks]
+
+                bs = self.probe_player.batch_size
+                for c in range(0, len(model_idx), bs):
+                    chunk = model_idx[c:c + bs]
+                    choices = self.probe_player.choose_for_boards(
+                        [games[i]["board"] for i in chunk]
+                    )
+                    for i, choice in zip(chunk, choices):
+                        g = games[i]
+                        b = g["board"]
+                        move = choice.move
+                        if move is None:
+                            legal = list(b.legal_moves)
+                            if not legal:
+                                continue
+                            move = random.Random(
+                                f"fallback-{g['opening_idx']}-{b.ply()}"
+                            ).choice(legal)
+                        b.push(move)
+                        g["history"].append(move.uci())
+
+                if engine_results is not None:
+                    ucis = list(engine_results)
+                    for i, uci in zip(engine_idx, ucis):
+                        if uci:
+                            g = games[i]
+                            g["board"].push_uci(uci)
+                            g["history"].append(uci)
+
+                active = [
+                    i for i in model_idx + engine_idx
+                    if not games[i]["board"].is_game_over()
+                    and games[i]["board"].ply() < MAX_PLIES
+                ]
+                elapsed = time.monotonic() - started
+                print(
+                    f"\rPromotion-scan games: {len(found)}/{needed} positions "
+                    f"({{}} games left) | {elapsed:.0f}s".format(len(active)),
+                    end="",
+                    flush=True,
+                )
+        finally:
+            if pool is not None:
+                pool.terminate()
+        print()
+        return found[:needed]
+
     # -- Lichess extraction --------------------------------------------------
 
     def _extract_parallel(self, dataset_path: str, worker: Callable,
@@ -672,10 +1177,14 @@ class CorpusGenerator:
 
         rng = random.Random(42)
         positions = []
+        seen_fens = set()
 
         # Generate K+Q vs K positions
         for _ in range(n_positions // 2):
             board = generate_kqk_position(rng)
+            if board.fen() in seen_fens:
+                continue
+            seen_fens.add(board.fen())
 
             # Create history to reach this position
             # We'll generate a random but valid sequence
@@ -693,6 +1202,9 @@ class CorpusGenerator:
         # Generate K+R vs K positions
         for _ in range(n_positions // 2):
             board = generate_krk_position(rng)
+            if board.fen() in seen_fens:
+                continue
+            seen_fens.add(board.fen())
 
             history = self._generate_history_to_board(board, rng)
 
@@ -730,19 +1242,141 @@ class CorpusGenerator:
         # In production, we'd want to generate a real history
         return []
 
+    # -- on-policy fallbacks (used when no Lichess dataset is available) ------
+
+    def generate_mate1_positions(self, n_target: int = 2000,
+                                 positions_path: Optional[str] = None,
+                                 out_dir: str = "results/corpus") -> Path:
+        """Build a mate-in-1 corpus by scanning on-policy positions.
+
+        Fallback when no Lichess dataset is available: finds positions (from
+        model-vs-engine games) where the side to move has at least one
+        mating move. Same record schema as the Lichess extractor.
+        """
+        out_path = Path(out_dir) / "probe_mate1.jsonl"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        src = Path(positions_path) if positions_path else Path(out_dir) / "onpolicy_positions.jsonl"
+        if not src.exists():
+            print(f"\u26a0\ufe0f Mate-in-1 fallback skipped ({src} missing)")
+            return out_path
+
+        positions = jsonl_read(src)
+        rng = random.Random(0)
+        rng.shuffle(positions)
+
+        selected = []
+        for pos in positions:
+            if len(selected) >= n_target:
+                break
+            history = pos.get("history") or []
+            if not history:
+                continue
+            try:
+                board = replay(history)
+            except (ValueError, AssertionError):
+                continue
+            if board.is_checkmate():
+                continue
+            mates = []
+            for move in board.legal_moves:
+                board.push(move)
+                if board.is_checkmate():
+                    mates.append(move.uci())
+                board.pop()
+            if mates:
+                selected.append({
+                    "fen": board.fen(),
+                    "history": list(history),
+                    "moves": list(history),
+                    "ply": board.ply(),
+                    "mates": mates,
+                    "model_color": pos.get("model_color", "white"),
+                    "source": "onpolicy",
+                })
+
+        jsonl_write(out_path, selected)
+        print(f"\u2705 Generated {len(selected)} mate-in-1 positions (on-policy fallback)")
+        return out_path
+
+    def extract_captures_from_onpolicy(self, n_target: int = 2000,
+                                       positions_path: Optional[str] = None,
+                                       out_dir: str = "results/corpus") -> Path:
+        """Build a capture corpus by scanning on-policy positions.
+
+        Fallback when no Lichess dataset is available: for each position the
+        highest-SEE legal capture is labeled ({capture_move, see}).
+        """
+        out_path = Path(out_dir) / "probe_captures.jsonl"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        src = Path(positions_path) if positions_path else Path(out_dir) / "onpolicy_positions.jsonl"
+        if not src.exists():
+            print(f"\u26a0\ufe0f Captures fallback skipped ({src} missing)")
+            return out_path
+
+        positions = jsonl_read(src)
+        rng = random.Random(0)
+        rng.shuffle(positions)
+
+        selected = []
+        for pos in positions:
+            if len(selected) >= n_target:
+                break
+            history = pos.get("history") or []
+            if not history:
+                continue
+            try:
+                board = replay(history)
+            except (ValueError, AssertionError):
+                continue
+            best_move, best_see = None, None
+            for move in board.legal_moves:
+                if not board.is_capture(move):
+                    continue
+                value = see_func(board, move)
+                if best_see is None or value > best_see:
+                    best_move, best_see = move, value
+            if best_move is None:
+                continue
+            selected.append({
+                "fen": board.fen(),
+                "history": list(history),
+                "ply": board.ply(),
+                "capture_move": best_move.uci(),
+                "see": best_see,
+                "model_color": pos.get("model_color", "white"),
+                "source": "onpolicy",
+            })
+
+        jsonl_write(out_path, selected)
+        print(f"\u2705 Generated {len(selected)} capture positions (on-policy fallback)")
+        return out_path
+
     def generate_all_corpora(
         self,
         lichess_path: Optional[str] = None,
         n_onpolicy: int = 2000,
         levels: Optional[List[int]] = None,
         out_dir: str = "results/corpus",
+        conversion_games: int = 2000,
+        min_per_threshold: int = 300,
+        promotion_target: int = 1000,
+        seed: int = 0,
+        only: Optional[List[str]] = None,
     ) -> dict:
         """Generate all corpora needed for C1-C14 evaluation.
 
         Args:
             lichess_path: Path to Lichess dataset (optional)
             n_onpolicy: Number of on-policy games
+            levels: Engine levels for on-policy games
             out_dir: Output directory
+            conversion_games: Number of games for the conversion corpus (C8)
+            min_per_threshold: Minimum positions per conversion threshold
+            promotion_target: Target size of the promotion corpus (C10)
+            seed: Base random seed
+            only: Restrict generation to these corpus names (e.g. ["conversion"])
 
         Returns:
             Dict of {corpus_name: path}
@@ -750,39 +1384,78 @@ class CorpusGenerator:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        def wanted(name: str) -> bool:
+            return only is None or name in only
+
         corpora = {}
 
         # 1. On-policy positions (generation)
-        print("\n=== Generating on-policy positions ===")
-        corpora['onpolicy'] = self.generate_onpolicy_positions(
-            n_games=n_onpolicy,
-            levels=levels or [0, 1, 2, 3],
-            out_dir=out_dir,
-        )
-
-        # 2. Mate-in-1 positions (from Lichess if available)
-        if lichess_path:
-            print("\n=== Extracting mate-in-1 positions ===")
-            corpora['mate1'] = self.extract_mate1_from_lichess(
-                lichess_path, out_dir=out_dir
+        if wanted("onpolicy"):
+            print("\n=== Generating on-policy positions ===")
+            corpora['onpolicy'] = self.generate_onpolicy_positions(
+                n_games=n_onpolicy,
+                levels=levels or [0, 1, 2, 3],
+                seed=seed,
+                out_dir=out_dir,
             )
 
-        # 3. Capture positions (from Lichess if available)
-        if lichess_path:
-            print("\n=== Extracting capture positions ===")
-            corpora['captures'] = self.extract_captures_from_lichess(
-                lichess_path, out_dir=out_dir
-            )
+        # 2. Mate-in-1 positions (from Lichess, or on-policy fallback)
+        if wanted("mate1"):
+            if lichess_path:
+                print("\n=== Extracting mate-in-1 positions ===")
+                corpora['mate1'] = self.extract_mate1_from_lichess(
+                    lichess_path, out_dir=out_dir
+                )
+            else:
+                print("\n=== Generating mate-in-1 positions (on-policy fallback) ===")
+                corpora['mate1'] = self.generate_mate1_positions(out_dir=out_dir)
+
+        # 3. Capture positions (from Lichess, or on-policy fallback)
+        if wanted("captures"):
+            if lichess_path:
+                print("\n=== Extracting capture positions ===")
+                corpora['captures'] = self.extract_captures_from_lichess(
+                    lichess_path, out_dir=out_dir
+                )
+            else:
+                print("\n=== Extracting capture positions (on-policy fallback) ===")
+                corpora['captures'] = self.extract_captures_from_onpolicy(out_dir=out_dir)
 
         # 4. Endgame positions (generated)
-        print("\n=== Generating endgame positions ===")
-        corpora['endgames'] = self.generate_endgame_positions(out_dir=out_dir)
+        if wanted("endgames"):
+            print("\n=== Generating endgame positions ===")
+            corpora['endgames'] = self.generate_endgame_positions(out_dir=out_dir)
+
+        # 5. Conversion positions (C8)
+        if wanted("conversion"):
+            print("\n=== Generating conversion positions ===")
+            corpora['conversion'] = self.generate_conversion_positions(
+                n_games=conversion_games,
+                min_per_threshold=min_per_threshold,
+                seed=seed,
+                out_dir=out_dir,
+            )
+
+        # 6. Promotion positions (C10)
+        if wanted("promotion"):
+            print("\n=== Generating promotion positions ===")
+            corpora['promotion'] = self.generate_promotion_positions(
+                target=promotion_target,
+                lichess_path=lichess_path,
+                seed=seed,
+                out_dir=out_dir,
+            )
 
         # Write manifest
         manifest = {
             "corpora": {name: str(path) for name, path in corpora.items()},
-            "seeds": {"onpolicy": 0},
-            "version": "1.0",
+            "seeds": {
+                "onpolicy": seed,
+                "conversion": seed,
+                "promotion": seed,
+                "endgames": 42,
+            },
+            "version": "1.1",
             "date": str(Path(out_dir).stat().st_ctime),
         }
 
@@ -822,6 +1495,16 @@ def main():
                         help="Path to Lichess dataset for extraction")
     parser.add_argument("--onpolicy", type=int, default=2000,
                         help="Number of on-policy games")
+    parser.add_argument("--conversion-games", type=int, default=2000,
+                        help="Number of games for the conversion corpus (C8)")
+    parser.add_argument("--min-per-threshold", type=int, default=300,
+                        help="Minimum conversion positions per material threshold")
+    parser.add_argument("--promotion-target", type=int, default=1000,
+                        help="Target number of promotion positions (C10)")
+    parser.add_argument("--seed", type=int, default=0, help="Base random seed")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Comma-separated corpus names to generate "
+                             "(onpolicy,mate1,captures,endgames,conversion,promotion)")
     args = parser.parse_args()
 
     # Create generator
@@ -837,7 +1520,12 @@ def main():
         lichess_path=args.lichess,
         n_onpolicy=args.onpolicy,
         levels=args.levels,
-        out_dir=args.out
+        out_dir=args.out,
+        conversion_games=args.conversion_games,
+        min_per_threshold=args.min_per_threshold,
+        promotion_target=args.promotion_target,
+        seed=args.seed,
+        only=args.only.split(",") if args.only else None,
     )
 
 

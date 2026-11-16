@@ -7,19 +7,21 @@ This module analyzes game records to compute:
 - C12: Variance and robustness
 
 Usage:
-    uv run diag/analyze_games.py --games results/eval_base/*.jsonl --out results/analysis.json
+    uv run diag/analyze_games.py --games results/eval_base --out results/analysis
+    uv run diag/analyze_games.py --games results/eval_base/seed0.games.jsonl --out results/analysis
+    uv run diag/analyze_games.py --games 'results/eval_base/*.games.jsonl' --out results/analysis
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Any
-import random
+from typing import Any, Dict, List
 
 import chess
 
@@ -27,9 +29,12 @@ import chess
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from .common import material_value, material_diff, jsonl_read, jsonl_write
+    from .common import material_diff, jsonl_read
 except ImportError:
-    from diag.common import material_value, material_diff, jsonl_read, jsonl_write
+    from diag.common import material_diff, jsonl_read
+
+
+CONVERSION_THRESHOLDS = (2, 3, 5, 9)
 
 
 @dataclass
@@ -42,31 +47,44 @@ class GameAnalysis:
     white_stats: Dict
     black_stats: Dict
     meta: Dict
-    
+
     # Computed metrics
     material_history: List[float] = field(default_factory=list)
-    fallbacks_by_ply: Dict[int, int] = field(default_factory=dict)
+    model_fallbacks: int = 0
+    model_decisions: int = 0
     repetition_count: int = 0
     conversion_opportunities: List[Dict] = field(default_factory=list)
 
 
+def _resolve_game_files(spec: str) -> List[Path]:
+    """Resolve one --games argument: file, directory, or glob pattern."""
+    p = Path(spec)
+    if p.is_file():
+        return [p]
+    if p.is_dir():
+        return sorted(p.glob("*.jsonl"))
+    if any(ch in spec for ch in "*?["):
+        matches = sorted(p2 for p2 in p.parent.glob(p.name) if p2.is_file())
+        if matches:
+            return matches
+        return sorted(Path.cwd().glob(spec))
+    return []
+
+
 class GameAnalyzer:
     """Analyzes game records to compute various metrics."""
-    
-    def __init__(self):
-        pass
-    
+
     def analyze_game(self, game_record: Dict) -> GameAnalysis:
         """Analyze a single game record.
-        
+
         Args:
             game_record: Dictionary with game data
-            
+
         Returns:
             GameAnalysis object with computed metrics
         """
         analysis = GameAnalysis(
-            game_id=game_record.get("opening_id", "unknown"),
+            game_id=str(game_record.get("opening_id", game_record.get("meta", {}).get("seed", "unknown"))),
             moves=game_record.get("moves", []),
             result=game_record.get("result", "*"),
             termination=game_record.get("termination", "unknown"),
@@ -74,212 +92,204 @@ class GameAnalyzer:
             black_stats=game_record.get("black_stats", {}),
             meta=game_record.get("meta", {}),
         )
-        
-        # Compute material history
+
+        model_color = chess.WHITE if analysis.meta.get("model_color", "white") == "white" else chess.BLACK
+
+        # Fallback stats for the model's side
+        model_stats = analysis.white_stats if model_color == chess.WHITE else analysis.black_stats
+        analysis.model_fallbacks = model_stats.get("fallbacks", 0)
+        analysis.model_decisions = model_stats.get("decisions", 0)
+
+        # Replay the game once; track the model's material advantage (POV diff)
         board = chess.Board()
         material_history = []
-        
-        for i, uci in enumerate(analysis.moves):
+        position_counts = defaultdict(int)
+        position_counts[board.fen()] += 1
+
+        for uci in analysis.moves:
             try:
                 board.push_uci(uci)
-                mat = material_value(board, chess.WHITE)
-                material_history.append(mat)
-            except:
+            except ValueError:
                 break
-        
+            # Model-POV material advantage after each ply
+            material_history.append(material_diff(board, model_color))
+            position_counts[board.fen()] += 1
+
         analysis.material_history = material_history
-        
-        # Track fallbacks
-        if "white_stats" in game_record:
-            for attempt_idx, count in enumerate(game_record["white_stats"].get("attempts", [0, 0, 0])):
-                # Fallback = attempt 0 (all top-3 illegal)
-                if attempt_idx == 2:  # This is the fallback count
-                    for ply in range(len(analysis.moves)):
-                        if board.turn == chess.WHITE:
-                            analysis.fallbacks_by_ply[ply] = count
-        
-        # Count repetitions
-        position_counts = defaultdict(int)
-        for i, uci in enumerate(analysis.moves):
-            try:
-                if i % 2 == 0:  # After white's move
-                    fen = board.fen()
-                    position_counts[fen] += 1
-            except:
-                pass
-        
+
+        # C11: most frequent position across the whole game
         analysis.repetition_count = max(position_counts.values()) if position_counts else 0
-        
-        # Find conversion opportunities (+2, +3, +5, +9 material)
-        for i, mat in enumerate(material_history):
-            if mat >= 2:
-                # Check if this is a conversion opportunity
-                # Look ahead to see if advantage was maintained
-                for j in range(i, min(i + 20, len(material_history))):
-                    if material_history[j] < mat - 1:  # Lost advantage
-                        break
-                else:
-                    # Advantage maintained for 20+ plies
+
+        # C8: first crossing of each material-advantage threshold (model POV)
+        recorded = set()
+        for ply, diff in enumerate(material_history):
+            for threshold in CONVERSION_THRESHOLDS:
+                if threshold in recorded:
+                    continue
+                if diff >= threshold:
+                    recorded.add(threshold)
                     analysis.conversion_opportunities.append({
-                        "ply": i,
-                        "advantage": mat,
+                        "ply": ply,
+                        "threshold": threshold,
+                        "advantage": diff,
                         "result": analysis.result,
                     })
-        
+
         return analysis
-    
-    def analyze_all_games(self, games_dir: Path) -> Dict[str, Any]:
-        """Analyze all games in a directory.
-        
+
+    def analyze_all_games(self, games_spec: List[str]) -> Dict[str, Any]:
+        """Analyze all games from files, directories, or glob patterns.
+
         Args:
-            games_dir: Directory containing game files
-            
+            games_spec: List of file paths, directories, or glob patterns
+
         Returns:
             Dictionary with analysis results
         """
-        # Collect all game files
-        game_files = list(Path(games_dir).glob("*.jsonl"))
-        
+        game_files: List[Path] = []
+        seen = set()
+        for spec in games_spec:
+            for gf in _resolve_game_files(spec):
+                if gf not in seen:
+                    seen.add(gf)
+                    game_files.append(gf)
+
         all_games = []
         for gf in game_files:
             games = jsonl_read(gf)
             all_games.extend(games)
-        
-        print(f"Analyzing {len(all_games)} games...")
-        
+
+        print(f"Analyzing {len(all_games)} games from {len(game_files)} files...")
+
         # Analyze each game
         analyses = []
         for i, game in enumerate(all_games):
-            if i % 100 == 0:
+            if i % 100 == 0 and i > 0:
                 print(f"  Processed {i}/{len(all_games)} games...")
-            analysis = self.analyze_game(game)
-            analyses.append(analysis)
-        
-        # Compute aggregate metrics
-        results = self._aggregate_results(analyses)
-        
-        return results
-    
+            try:
+                analyses.append(self.analyze_game(game))
+            except Exception as e:
+                print(f"  Skipping game {i}: {e}")
+
+        return self._aggregate_results(analyses)
+
     def _aggregate_results(self, analyses: List[GameAnalysis]) -> Dict[str, Any]:
         """Aggregate analysis results."""
-        
+
         # C4: Force brute by level
         level_stats = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0, "total": 0})
-        
-        # C8: Conversion rates
+
+        # C8: Conversion rates by threshold
         conversion_stats = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0, "total": 0})
-        
+
         # C11: Repetition stats
         repetition_counts = []
-        
+
         # C12: Score by opening
         opening_stats = defaultdict(lambda: {"wins": 0, "draws": 0, "losses": 0, "total": 0, "score": 0})
-        
+
         for analysis in analyses:
+            model_color = analysis.meta.get("model_color", "white")
+
             # C4: By level
-            level = analysis.meta.get("level", 0)
-            level_key = str(level)
-            
+            level_key = str(analysis.meta.get("level", 0))
+
             if analysis.result == "1-0":
-                if analysis.meta.get("model_color") == "white":
+                if model_color == "white":
                     level_stats[level_key]["wins"] += 1
                 else:
                     level_stats[level_key]["losses"] += 1
             elif analysis.result == "0-1":
-                if analysis.meta.get("model_color") == "white":
+                if model_color == "white":
                     level_stats[level_key]["losses"] += 1
                 else:
                     level_stats[level_key]["wins"] += 1
             elif analysis.result == "1/2-1/2":
                 level_stats[level_key]["draws"] += 1
-            
+
             level_stats[level_key]["total"] += 1
-            
-            # C8: Conversion
+
+            # C8: Conversion (one entry per threshold per game)
             for opp in analysis.conversion_opportunities:
-                advantage = opp["advantage"]
-                threshold = None
-                if advantage >= 9:
-                    threshold = ">=9"
-                elif advantage >= 5:
-                    threshold = ">=5"
-                elif advantage >= 3:
-                    threshold = ">=3"
-                elif advantage >= 2:
-                    threshold = ">=2"
-                
-                if threshold:
-                    if opp["result"] == "1-0":
+                threshold = str(opp["threshold"])
+                if opp["result"] == "1-0":
+                    if model_color == "white":
                         conversion_stats[threshold]["wins"] += 1
-                    elif opp["result"] == "0-1":
+                    else:
+                        conversion_stats[threshold]["losses"] += 1
+                elif opp["result"] == "0-1":
+                    if model_color == "white":
                         conversion_stats[threshold]["losses"] += 1
                     else:
-                        conversion_stats[threshold]["draws"] += 1
-                    conversion_stats[threshold]["total"] += 1
-            
+                        conversion_stats[threshold]["wins"] += 1
+                else:
+                    conversion_stats[threshold]["draws"] += 1
+                conversion_stats[threshold]["total"] += 1
+
             # C11: Repetitions
             repetition_counts.append(analysis.repetition_count)
-            
+
             # C12: By opening
             opening_id = analysis.game_id
             if opening_id != "unknown":
                 if analysis.result == "1-0":
-                    if analysis.meta.get("model_color") == "white":
+                    if model_color == "white":
                         opening_stats[opening_id]["wins"] += 1
                     else:
                         opening_stats[opening_id]["losses"] += 1
                 elif analysis.result == "0-1":
-                    if analysis.meta.get("model_color") == "white":
+                    if model_color == "white":
                         opening_stats[opening_id]["losses"] += 1
                     else:
                         opening_stats[opening_id]["wins"] += 1
                 elif analysis.result == "1/2-1/2":
                     opening_stats[opening_id]["draws"] += 1
                 opening_stats[opening_id]["total"] += 1
-        
+
         # Compute scores
         for level, stats in level_stats.items():
             total = stats["total"]
             if total > 0:
                 stats["score"] = (stats["wins"] + 0.5 * stats["draws"]) / total
-        
+
         for threshold, stats in conversion_stats.items():
             total = stats["total"]
             if total > 0:
                 stats["conversion_rate"] = stats["wins"] / total
                 stats["draw_rate"] = stats["draws"] / total
                 stats["loss_rate"] = stats["losses"] / total
-        
+
         # C12: Bootstrap confidence intervals
         opening_scores = {}
         for opening_id, stats in opening_stats.items():
             total = stats["total"]
             if total > 0:
                 opening_scores[opening_id] = (stats["wins"] + 0.5 * stats["draws"]) / total
-        
-        # Compute bootstrap CI
+
+        # Compute bootstrap CI (seeded for determinism)
         if len(opening_scores) > 10:
             scores_list = list(opening_scores.values())
             n_bootstrap = 10000
+            rng = random.Random(0)
             bootstrap_means = []
-            
+
             for _ in range(n_bootstrap):
-                sample = random.choices(scores_list, k=len(scores_list))
+                sample = rng.choices(scores_list, k=len(scores_list))
                 bootstrap_means.append(sum(sample) / len(sample))
-            
+
             bootstrap_means.sort()
             lower = bootstrap_means[int(0.025 * n_bootstrap)]
             upper = bootstrap_means[int(0.975 * n_bootstrap)]
             mean_score = sum(scores_list) / len(scores_list)
         else:
             lower = upper = mean_score = sum(opening_scores.values()) / len(opening_scores) if opening_scores else 0
-        
+
         # Sort openings by score
         sorted_openings = sorted(opening_scores.items(), key=lambda x: x[1])
-        
+
         return {
-            "C4_by_level": level_stats,
-            "C8_conversion": conversion_stats,
+            "C4_by_level": dict(level_stats),
+            "C8_conversion": dict(conversion_stats),
             "C11_repetitions": {
                 "max": max(repetition_counts) if repetition_counts else 0,
                 "mean": sum(repetition_counts) / len(repetition_counts) if repetition_counts else 0,
@@ -297,25 +307,27 @@ class GameAnalyzer:
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze game records")
-    parser.add_argument("--games", type=str, required=True,
-                        help="Directory or glob pattern for game files")
-    parser.add_argument("--out", type=str, default="results/analysis.json",
-                        help="Output file path")
+    parser.add_argument("--games", type=str, nargs="+", required=True,
+                        help="Game files, directories, or glob patterns")
+    parser.add_argument("--out", type=str, default="results/analysis/analysis_base.json",
+                        help="Output file path (a directory writes analysis_base.json inside)")
     args = parser.parse_args()
-    
+
     # Create analyzer
     analyzer = GameAnalyzer()
-    
+
     # Analyze games
-    results = analyzer.analyze_all_games(Path(args.games))
-    
+    results = analyzer.analyze_all_games(args.games)
+
     # Save results
     out_path = Path(args.out)
+    if out_path.is_dir() or out_path.suffix != ".json":
+        out_path = out_path / "analysis_base.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     with open(out_path, 'w') as f:
         json.dump(results, f, indent=2)
-    
+
     print(f"✅ Analysis saved to {out_path}")
 
 
