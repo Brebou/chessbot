@@ -1481,6 +1481,9 @@ def resolve_lichess_path(args) -> Optional[str]:
     if only is not None and not (only & LICHESS_NEEDED_CORPORA):
         return None
     try:
+        if args.lichess_source == "train":
+            from diag.common import ensure_training_dataset
+            return str(ensure_training_dataset(workers=args.workers))
         from diag.common import ensure_lichess_dataset
         return str(ensure_lichess_dataset(month=args.lichess_month))
     except Exception as exc:
@@ -1515,8 +1518,15 @@ def main():
     parser.add_argument("--lichess", type=str, default=None,
                         help="Path to Lichess dataset (.jsonl or .jsonl.gz); "
                              "default: auto-download to data/lichess_uci.jsonl.gz if missing")
-    parser.add_argument("--lichess-month", type=str, default="201403",
-                        help="Lichess dataset month (YYYYMM) to auto-download")
+    parser.add_argument("--lichess-month", type=str, default="201412",
+                        help="Lichess dataset month (YYYYMM) to auto-download "
+                             "(--lichess-source uci only)")
+    parser.add_argument("--lichess-source", type=str, default="train",
+                        choices=["train", "uci"],
+                        help="Auto-downloaded dataset: 'train' = the model's actual "
+                             "training corpus (dlouapre/lichess_2025-01_1M, exact "
+                             "seen/unseen split for P7); 'uci' = austindavis/lichess-uci "
+                             "monthly dumps")
     parser.add_argument("--no-lichess", action="store_true",
                         help="Do not use a Lichess dataset (fall back to on-policy extraction)")
     parser.add_argument("--onpolicy", type=int, default=2000,

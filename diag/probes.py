@@ -1211,8 +1211,9 @@ def main():
                         help="Worker processes for engine moves in game-playing probes")
     parser.add_argument("--lichess", type=str, default=None,
                         help="Path to Lichess dataset (.jsonl or .jsonl.gz) for P7; "
-                             "default: data/lichess_uci_<month>.jsonl.gz if present "
-                             "(auto-downloaded by gen_corpus.py)")
+                             "default: the converted training dataset "
+                             "(data/lichess_train_*.jsonl.gz) if present, else the "
+                             "austindavis monthly file auto-downloaded by gen_corpus.py")
     parser.add_argument("--split-index", type=int, default=940_000,
                         help="Game index separating seen (training) from unseen positions")
     parser.add_argument("--p7-unseen", type=int, default=10_000,
@@ -1224,9 +1225,12 @@ def main():
     lichess_path = args.lichess
     if lichess_path is None:
         data_dir = Path("data")
+        training = sorted(data_dir.glob("lichess_train_*.jsonl.gz"))
         monthly = sorted(data_dir.glob("lichess_uci_*.jsonl.gz"))
         legacy = data_dir / "lichess_uci.jsonl.gz"
-        if monthly:
+        if training:
+            lichess_path = str(training[-1])
+        elif monthly:
             lichess_path = str(monthly[-1])
         elif legacy.exists():
             lichess_path = str(legacy)

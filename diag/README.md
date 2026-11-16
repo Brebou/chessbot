@@ -104,15 +104,19 @@ and `results/profile/profile.md` + `profile.json`.
 
 Notes:
 
-- **Lichess dataset:** by default `gen_corpus.py` auto-downloads one month of the
-  [austindavis/lichess-uci](https://huggingface.co/datasets/austindavis/lichess-uci)
-  dataset (Lichess games in UCI notation with Elo fields, ~330 MB for the default
-  2014-12 month, ~1.35M games) and converts it to `data/lichess_uci_<month>.jsonl.gz`.
-  Override with `--lichess PATH`, choose the month with `--lichess-month YYYYMM`, or
-  disable with `--no-lichess` (then `mate1`/`captures` fall back to scanning the
-  on-policy games, and P7 (C13) is recorded as `SKIPPED` in `probes_base.json`).
-  `probes.py` reuses the downloaded file automatically for P7. If the dataset has
-  fewer games than the split index, P7 falls back to an adaptive 90/10 split.
+- **Lichess dataset:** by default `gen_corpus.py` auto-downloads the model's actual
+  training corpus, [dlouapre/lichess_2025-01_1M](https://huggingface.co/datasets/dlouapre/lichess_2025-01_1M)
+  (~280 MB, 1M games in the annotated `WQd1h5(x+)` notation), parses it to UCI with
+  per-game replay validation and caches it as `data/lichess_train_2025-01_1M.jsonl.gz`.
+  This makes P7's seen/unseen split (index 940,000) **exact**: the first 940,000 games
+  are the model's training data, the rest are unseen. Use `--lichess-source uci` to
+  download a month of [austindavis/lichess-uci](https://huggingface.co/datasets/austindavis/lichess-uci)
+  instead (UCI notation with Elo fields, `--lichess-month YYYYMM`, default 2014-12),
+  `--lichess PATH` for a local file, or `--no-lichess` to disable (then `mate1`/
+  `captures` fall back to scanning the on-policy games, and P7 (C13) is recorded as
+  `SKIPPED` in `probes_base.json`). `probes.py` reuses the downloaded file
+  automatically for P7 (training dataset preferred). If the dataset has fewer games
+  than the split index, P7 falls back to an adaptive 90/10 split.
 - `fast_engine.py` (optimized engine, move-identical to `chess_hw.engine.Engine`) and
   `fast_probe.py` (last-position batched logits, bit-identical to `ProbePlayer._batch_logits`)
   are used by the pipeline for speed; `chess_hw/` itself is never modified.
