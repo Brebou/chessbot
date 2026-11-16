@@ -1093,26 +1093,28 @@ class CorpusGenerator:
                         games_scanned += len(block)
                         show_progress()
             else:
-                import threading
-                sem = threading.Semaphore(self.workers * 4)
-
-                def blocks():
-                    nonlocal games_scanned
-                    with gzip.open(dataset_path, 'rt') as f:
-                        while True:
+                # apply_async with a bounded pending window instead of
+                # imap_unordered over a generator: pool.terminate() joins the
+                # task-handler thread, which would deadlock if it were blocked
+                # inside a user generator (semaphore/lock) when we stop early.
+                window = self.workers * 4
+                pending = []
+                exhausted = False
+                with gzip.open(dataset_path, 'rt') as f:
+                    while True:
+                        while len(pending) < window and not exhausted:
                             block = list(islice(f, _EXTRACT_BLOCK_LINES))
                             if not block:
-                                return
+                                exhausted = True
+                                break
                             games_scanned += len(block)
-                            sem.acquire()
-                            yield block
-
-                for block_positions in pool.imap_unordered(worker, blocks(), chunksize=1):
-                    sem.release()
-                    positions.extend(block_positions)
-                    show_progress()
-                    if len(positions) >= n_positions:
-                        break
+                            pending.append(pool.apply_async(worker, (block,)))
+                        if not pending:
+                            break
+                        positions.extend(pending.pop(0).get())
+                        show_progress()
+                        if len(positions) >= n_positions:
+                            break
         finally:
             if pool is not None:
                 pool.terminate()
