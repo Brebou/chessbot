@@ -1,6 +1,9 @@
 # Generated diagnostic artifacts
 results/
 
+# Downloaded datasets
+data/
+
 # Python
 __pycache__/
 *.pyc

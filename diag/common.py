@@ -5,6 +5,7 @@ Provides ProbePlayer for accessing full model logits, board utilities, and I/O h
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sys
@@ -400,6 +401,133 @@ def jsonl_write(path: Union[str, Path], rows: List[dict]) -> None:
     
     # Atomic rename
     os.replace(tmp_path, path)
+
+
+LICHESS_DATA_DIR = Path("data")
+LICHESS_HF_PARQUET_URL = ("https://huggingface.co/datasets/austindavis/lichess-uci/"
+                          "resolve/main/data/{month}/train-{shard:05d}-of-{n_shards:05d}.parquet")
+
+
+def _download_file(url: str, dest: Path) -> None:
+    """Stream a URL to disk with progress display, atomically."""
+    import urllib.request
+
+    print(f"Downloading {url} ...")
+    req = urllib.request.Request(url, headers={"User-Agent": "chessbot-diagnostics"})
+    tmp_path = dest.with_suffix('.tmp')
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp_path, 'wb') as f:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    print(f"\r   {downloaded / 1e6:.0f} / {total / 1e6:.0f} MB",
+                          end="", flush=True)
+        print()
+        os.replace(tmp_path, dest)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def ensure_lichess_dataset(month: str = "201412",
+                           out_path: Union[str, Path, None] = None,
+                           force: bool = False) -> Path:
+    """Ensure the Lichess UCI dataset is available locally, downloading it if needed.
+
+    Downloads one month of the austindavis/lichess-uci Hugging Face dataset (the
+    official Lichess database already converted to UCI moves, with player Elo
+    fields) and converts it to the gzipped JSONL format expected by the
+    diagnostic pipeline: {"moves": "e2e4 e7e5 ...", "WhiteElo": int, "BlackElo": int}.
+
+    Months are sharded on Hugging Face; all shards of the month are downloaded
+    and concatenated. Both the raw parquet shards and the converted file are
+    cached, so subsequent calls are no-ops. The default month (2014-12) contains
+    ~1.3M games, which keeps P7's default seen/unseen split (index 940,000)
+    usable.
+
+    Args:
+        month: Dataset month in YYYYMM format (default 2014-12, ~330 MB).
+        out_path: Target path for the converted dataset
+            (default data/lichess_uci_<month>.jsonl.gz).
+        force: Re-convert even if the converted file already exists.
+
+    Returns:
+        Path to the converted dataset.
+    """
+    out_path = (Path(out_path) if out_path
+                else LICHESS_DATA_DIR / f"lichess_uci_{month}.jsonl.gz")
+    if out_path.exists() and not force:
+        return out_path
+
+    LICHESS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    import urllib.error
+
+    shard_paths = []
+    n_shards = None
+    for candidate in range(1, 9):
+        parquet_path = LICHESS_DATA_DIR / f"lichess_uci_{month}_{candidate - 1:05d}.parquet"
+        if parquet_path.exists():
+            shard_paths.append(parquet_path)
+            continue
+        url = LICHESS_HF_PARQUET_URL.format(
+            month=month, shard=candidate - 1, n_shards=candidate)
+        try:
+            _download_file(url, parquet_path)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                if candidate == 1:
+                    continue
+                n_shards = candidate - 1
+                break
+            raise
+        shard_paths.append(parquet_path)
+    if n_shards is None:
+        n_shards = len(shard_paths)
+    if not shard_paths:
+        raise ValueError(f"No parquet shards found for month {month} "
+                         f"(check the month and your connection)")
+    if len(shard_paths) < n_shards:
+        for idx in range(len(shard_paths), n_shards):
+            parquet_path = LICHESS_DATA_DIR / f"lichess_uci_{month}_{idx:05d}.parquet"
+            url = LICHESS_HF_PARQUET_URL.format(month=month, shard=idx, n_shards=n_shards)
+            _download_file(url, parquet_path)
+            shard_paths.append(parquet_path)
+
+    print(f"Converting {len(shard_paths)} parquet shard(s) -> {out_path} ...")
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyarrow is required to read the downloaded parquet files; "
+            "install it with 'uv add pyarrow'") from exc
+
+    tmp_out = out_path.with_suffix('.tmp')
+    n_games = 0
+    with gzip.open(tmp_out, 'wt') as out:
+        for parquet_path in shard_paths:
+            pf = pq.ParquetFile(parquet_path)
+            for batch in pf.iter_batches(batch_size=50_000,
+                                         columns=["Transcript", "WhiteElo", "BlackElo"]):
+                cols = batch.to_pydict()
+                for moves, white_elo, black_elo in zip(cols["Transcript"],
+                                                       cols["WhiteElo"], cols["BlackElo"]):
+                    if not moves:
+                        continue
+                    out.write(json.dumps({"moves": moves,
+                                          "WhiteElo": white_elo,
+                                          "BlackElo": black_elo}) + '\n')
+                    n_games += 1
+    os.replace(tmp_out, out_path)
+    print(f"   {n_games} games written to {out_path}")
+    return out_path
 
 
 def jsonl_read(path: Union[str, Path]) -> List[dict]:

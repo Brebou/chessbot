@@ -104,8 +104,15 @@ and `results/profile/profile.md` + `profile.json`.
 
 Notes:
 
-- Without a Lichess dataset, `mate1` and `captures` corpora fall back to scanning the
-  on-policy games, and P7 (C13) is recorded as `SKIPPED` in `probes_base.json`.
+- **Lichess dataset:** by default `gen_corpus.py` auto-downloads one month of the
+  [austindavis/lichess-uci](https://huggingface.co/datasets/austindavis/lichess-uci)
+  dataset (Lichess games in UCI notation with Elo fields, ~330 MB for the default
+  2014-12 month, ~1.35M games) and converts it to `data/lichess_uci_<month>.jsonl.gz`.
+  Override with `--lichess PATH`, choose the month with `--lichess-month YYYYMM`, or
+  disable with `--no-lichess` (then `mate1`/`captures` fall back to scanning the
+  on-policy games, and P7 (C13) is recorded as `SKIPPED` in `probes_base.json`).
+  `probes.py` reuses the downloaded file automatically for P7. If the dataset has
+  fewer games than the split index, P7 falls back to an adaptive 90/10 split.
 - `fast_engine.py` (optimized engine, move-identical to `chess_hw.engine.Engine`) and
   `fast_probe.py` (last-position batched logits, bit-identical to `ProbePlayer._batch_logits`)
   are used by the pipeline for speed; `chess_hw/` itself is never modified.
