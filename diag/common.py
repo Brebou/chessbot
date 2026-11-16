@@ -54,7 +54,7 @@ class ProbePlayer:
         self.device = device or next(model.parameters()).device
         
         # Auto-detect GPU and set optimal batch size
-        if self.device.type == 'cuda':
+        if self.device == 'cuda':
             # For GPU, use much larger batch sizes to maximize utilization
             # Model has ~946K params, each forward pass with batch B uses:
             # - Input: B * 256 * 4 bytes (int64)

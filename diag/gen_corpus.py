@@ -53,7 +53,10 @@ def _init_worker(model_path: str, device: str):
     import torch
     torch.set_num_threads(1)
     from chess_hw import load_model, ChessTokenizer
-    from .common import ProbePlayer
+    try:
+        from .common import ProbePlayer
+    except ImportError:
+        from diag.common import ProbePlayer
     
     _WORKER_STATE['model'] = load_model(model_path, device=device)
     _WORKER_STATE['tokenizer'] = ChessTokenizer()
@@ -374,23 +377,6 @@ class CorpusGenerator:
                 tasks.append((oid, level, seed, "white"))
                 tasks.append((oid, level, seed, "black"))
         
-        # Play games in parallel with worker initialization
-        all_positions = []
-        
-        ctx = get_context("spawn")
-        with ctx.Pool(self.workers, initializer=_init_worker, 
-                      initargs=(str(self.model_path), self.device)) as pool:
-            # Submit all tasks
-            futures = [pool.apply_async(CorpusGenerator._play_game_task, (task,)) for task in tasks]
-            
-            # Collect results
-            for future in futures:
-                try:
-                    positions = future.get()
-                    all_positions.extend(positions)
-                except Exception as e:
-                    print(f"Error in game: {e}", file=sys.stderr)
-
         def show_progress(done: int, started: float) -> None:
             total = len(tasks)
             elapsed = time.monotonic() - started
@@ -410,22 +396,20 @@ class CorpusGenerator:
         started = time.monotonic()
         print(f"Starting {len(tasks)} on-policy games (device={self.device})")
 
-        # A CUDA model cannot safely be serialized into several spawned
-        # workers sharing one GPU. Keep GPU generation in this process;
-        # multiprocessing remains available for CPU-only generation.
         all_positions = []
         if self.device == "cuda":
+            _init_worker(str(self.model_path), self.device)
             for done, task in enumerate(tasks, start=1):
-                all_positions.extend(self._play_game_worker(task))
+                all_positions.extend(self._play_game_task(task))
                 show_progress(done, started)
         else:
-            with ProcessPoolExecutor(max_workers=self.workers) as executor:
-                futures = {executor.submit(self._play_game_worker, task): task for task in tasks}
-
-                for done, future in enumerate(as_completed(futures), start=1):
+            ctx = get_context("spawn")
+            with ctx.Pool(self.workers, initializer=_init_worker,
+                          initargs=(str(self.model_path), self.device)) as pool:
+                futures = [pool.apply_async(CorpusGenerator._play_game_task, (task,)) for task in tasks]
+                for done, future in enumerate(futures, start=1):
                     try:
-                        positions = future.result()
-                        all_positions.extend(positions)
+                        all_positions.extend(future.get())
                     except Exception as e:
                         print(f"Error in game: {e}", file=sys.stderr)
                     show_progress(done, started)
