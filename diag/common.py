@@ -8,8 +8,10 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -403,9 +405,71 @@ def jsonl_write(path: Union[str, Path], rows: List[dict]) -> None:
     os.replace(tmp_path, path)
 
 
+class ProgressLine:
+    """Time-throttled single-line progress display for long-running scans.
+
+    Usage:
+        prog = ProgressLine()
+        for i, item in enumerate(items):
+            ...
+            prog.show(f"{i}/{len(items)} done | {prog.rate(i):.1f}/s | {prog.eta(i, len(items))}")
+        prog.close()
+    """
+
+    def __init__(self, min_interval: float = 1.0):
+        self.min_interval = min_interval
+        self.started = time.monotonic()
+        self._last = 0.0
+
+    def show(self, message: str, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last < self.min_interval:
+            return
+        self._last = now
+        print(f"\r{message}", end="", flush=True)
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def rate(self, done: int) -> float:
+        return done / max(self.elapsed, 1e-9)
+
+    def eta(self, done: int, total: int) -> str:
+        rate = self.rate(done)
+        if rate <= 0:
+            return "estimating..."
+        remaining = (total - done) / rate
+        if remaining >= 90:
+            return f"{remaining / 60:.1f} min left"
+        return f"{remaining:.0f}s left"
+
+    def close(self) -> None:
+        if self._last:
+            print()
+
+
+def count_jsonl_rows(path: Union[str, Path]) -> int:
+    """Count non-empty lines in a JSONL file (0 if missing/unreadable)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
 LICHESS_DATA_DIR = Path("data")
 LICHESS_HF_PARQUET_URL = ("https://huggingface.co/datasets/austindavis/lichess-uci/"
                           "resolve/main/data/{month}/train-{shard:05d}-of-{n_shards:05d}.parquet")
+
+TRAIN_DATASET = "dlouapre/lichess_2025-01_1M"
+TRAIN_DATASET_HF_PARQUET_URL = (f"https://huggingface.co/datasets/{TRAIN_DATASET}/"
+                                "resolve/main/data/train-{shard:05d}-of-{n_shards:05d}.parquet")
+TRAIN_DATASET_N_SHARDS = 2
+TRAIN_SEEN_GAMES = 940_000
+ANNOTATED_TOKEN_RE = re.compile(
+    r"^([WB])([PNBRQK])([a-h][1-8][a-h][1-8])(?:\(([a-zA-Z+*]*)\))?$")
+_PROMO_ANN_CHARS = set("qrbnQRBN")
 
 
 def _download_file(url: str, dest: Path) -> None:
@@ -527,6 +591,147 @@ def ensure_lichess_dataset(month: str = "201412",
                     n_games += 1
     os.replace(tmp_out, out_path)
     print(f"   {n_games} games written to {out_path}")
+    return out_path
+
+
+def parse_annotated_game(text: str) -> List[str]:
+    """Convert one game from the training dataset notation to UCI moves.
+
+    The training dataset (dlouapre/lichess_2025-01_1M) encodes each move as a
+    token like ``WQd1h5(x+)``: side (W/B) + moving piece (P/N/B/R/Q/K) + UCI
+    square pair + optional parenthesized annotations. Annotations are
+    informational except promotions, which are only encoded there: ``x``
+    capture, ``+`` check, ``*`` mate, ``o``/``O`` castling, ``E`` en passant,
+    and ``Q``/``R``/``B``/``N`` promotion piece.
+
+    Raises:
+        ValueError: on a token that does not match the notation.
+    """
+    moves = []
+    for tok in text.split():
+        m = ANNOTATED_TOKEN_RE.match(tok)
+        if m is None:
+            raise ValueError(f"Unparsable move token: {tok!r}")
+        uci = m.group(3)
+        for ch in m.group(4) or "":
+            if ch in _PROMO_ANN_CHARS:
+                uci += ch.lower()
+        moves.append(uci)
+    return moves
+
+
+def _valid_uci_game(moves: List[str]) -> bool:
+    board = chess.Board()
+    try:
+        for uci in moves:
+            board.push_uci(uci)
+    except Exception:
+        return False
+    return True
+
+
+def _convert_train_block(texts: List[str]) -> Tuple[int, List[str], int]:
+    """Convert a block of raw game texts to UCI JSON lines (pool worker).
+
+    Returns (n_invalid, json_lines, n_valid): games that fail replay validation
+    are dropped so downstream corpora and probes only see legal move sequences.
+    """
+    lines = []
+    n_valid = 0
+    n_invalid = 0
+    for text in texts:
+        try:
+            moves = parse_annotated_game(text)
+        except ValueError:
+            n_invalid += 1
+            continue
+        if not moves or not _valid_uci_game(moves):
+            n_invalid += 1
+            continue
+        lines.append(json.dumps({"moves": " ".join(moves)}, sort_keys=True))
+        n_valid += 1
+    return n_invalid, lines, n_valid
+
+
+def ensure_training_dataset(out_path: Union[str, Path, None] = None,
+                            workers: int = 4,
+                            force: bool = False) -> Path:
+    """Ensure the model's training dataset is available as pipeline JSONL.
+
+    Downloads dlouapre/lichess_2025-01_1M (the exact corpus ChessGPT was
+    pre-trained on: the first 940,000 games are the model's training data, the
+    remaining ~60,000 are unseen) and converts the annotated notation to UCI
+    with per-game replay validation. Cached, so subsequent calls are no-ops.
+
+    Args:
+        out_path: Target path (default data/lichess_train_2025-01_1M.jsonl.gz).
+        workers: Worker processes for conversion/validation.
+        force: Re-convert even if the converted file already exists.
+
+    Returns:
+        Path to the converted dataset.
+    """
+    out_path = Path(out_path) if out_path else LICHESS_DATA_DIR / "lichess_train_2025-01_1M.jsonl.gz"
+    if out_path.exists() and not force:
+        return out_path
+
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyarrow is required to read the downloaded parquet files; "
+            "install it with 'uv add pyarrow'") from exc
+
+    LICHESS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    shard_paths = []
+    for shard in range(TRAIN_DATASET_N_SHARDS):
+        parquet_path = LICHESS_DATA_DIR / f"dlouapre_train_{shard:05d}.parquet"
+        if not parquet_path.exists():
+            url = TRAIN_DATASET_HF_PARQUET_URL.format(
+                shard=shard, n_shards=TRAIN_DATASET_N_SHARDS)
+            _download_file(url, parquet_path)
+        shard_paths.append(parquet_path)
+
+    print(f"Converting {TRAIN_DATASET} -> {out_path} "
+          f"(replay validation, {workers} workers) ...")
+    from multiprocessing import get_context
+
+    n_valid = 0
+    n_invalid = 0
+    tmp_out = out_path.with_suffix('.tmp')
+    pool = None
+    try:
+        if workers > 1:
+            pool = get_context("spawn").Pool(workers)
+
+        def blocks():
+            block = []
+            for parquet_path in shard_paths:
+                pf = pq.ParquetFile(parquet_path)
+                for batch in pf.iter_batches(batch_size=20_000, columns=["text"]):
+                    block.extend(batch.column("text").to_pylist())
+                    while len(block) >= 20_000:
+                        yield block[:20_000]
+                        block = block[20_000:]
+            if block:
+                yield block
+
+        with gzip.open(tmp_out, 'wt') as out:
+            convert = _convert_train_block
+            source = pool.imap(convert, blocks(), chunksize=1) if pool else map(convert, blocks())
+            for n_inv, lines, n in source:
+                n_invalid += n_inv
+                n_valid += n
+                if lines:
+                    out.write("\n".join(lines) + "\n")
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
+
+    os.replace(tmp_out, out_path)
+    print(f"   {n_valid} valid games written ({n_invalid} dropped); "
+          f"first {TRAIN_SEEN_GAMES} = seen, rest = unseen for P7")
     return out_path
 
 

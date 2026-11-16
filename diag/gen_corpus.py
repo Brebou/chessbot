@@ -49,7 +49,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from chess_hw import ChessTokenizer, load_model
 from chess_hw.match import load_openings, MAX_PLIES
 
-from diag.common import jsonl_read, jsonl_write, material_diff, replay
+from diag.common import (ProgressLine, count_jsonl_rows, jsonl_read, jsonl_write,
+                         material_diff, replay)
 from diag.fast_engine import FastEngine, engine_best_move_task
 from diag.fast_probe import FastProbePlayer
 from diag.see import see as see_func
@@ -228,6 +229,8 @@ def _pool_init():
 
 
 _EXTRACT_BLOCK_LINES = 500
+MATE1_POSITIONS = 5000
+CAPTURES_POSITIONS = 20000
 
 
 def _mate1_block_worker(lines: List[str]) -> List[dict]:
@@ -1066,6 +1069,18 @@ class CorpusGenerator:
         """
         positions: List[dict] = []
         started = time.monotonic()
+        prog = ProgressLine()
+        games_scanned = 0
+
+        def show_progress() -> None:
+            found = min(len(positions), n_positions)
+            prog.show(
+                f"{label}: {games_scanned:,} games scanned | "
+                f"{found:,}/{n_positions:,} positions | "
+                f"{prog.rate(games_scanned):,.0f} games/s | "
+                f"{prog.eta(found, n_positions)}"
+            )
+
         pool = self._make_engine_pool()
         try:
             if pool is None:
@@ -1075,33 +1090,40 @@ class CorpusGenerator:
                         if not block:
                             break
                         positions.extend(worker(block))
+                        games_scanned += len(block)
+                        show_progress()
             else:
                 import threading
                 sem = threading.Semaphore(self.workers * 4)
 
                 def blocks():
+                    nonlocal games_scanned
                     with gzip.open(dataset_path, 'rt') as f:
                         while True:
                             block = list(islice(f, _EXTRACT_BLOCK_LINES))
                             if not block:
                                 return
+                            games_scanned += len(block)
                             sem.acquire()
                             yield block
 
                 for block_positions in pool.imap_unordered(worker, blocks(), chunksize=1):
                     sem.release()
                     positions.extend(block_positions)
+                    show_progress()
                     if len(positions) >= n_positions:
                         break
         finally:
             if pool is not None:
                 pool.terminate()
 
+        prog.close()
         rate = len(positions) / max(time.monotonic() - started, 1e-9)
         print(f"   {label}: {len(positions)} positions ({rate:.0f}/s)")
         return positions[:n_positions]
 
-    def extract_mate1_from_lichess(self, dataset_path: str, n_positions: int = 5000,
+    def extract_mate1_from_lichess(self, dataset_path: str,
+                                   n_positions: int = MATE1_POSITIONS,
                                    out_dir: str = "results/corpus") -> Path:
         """Extract mate-in-1 positions from Lichess dataset.
 
@@ -1131,7 +1153,8 @@ class CorpusGenerator:
         print(f"\u2705 Extracted {len(positions)} mate-in-1 positions")
         return out_path
 
-    def extract_captures_from_lichess(self, dataset_path: str, n_positions: int = 20000,
+    def extract_captures_from_lichess(self, dataset_path: str,
+                                      n_positions: int = CAPTURES_POSITIONS,
                                       out_dir: str = "results/corpus") -> Path:
         """Extract positions with captures from Lichess dataset.
 
@@ -1265,10 +1288,16 @@ class CorpusGenerator:
         rng = random.Random(0)
         rng.shuffle(positions)
 
+        prog = ProgressLine()
         selected = []
-        for pos in positions:
+        for scanned, pos in enumerate(positions, 1):
             if len(selected) >= n_target:
                 break
+            prog.show(
+                f"Mate-in-1 scan: {scanned:,}/{len(positions):,} positions | "
+                f"{len(selected):,}/{n_target:,} selected | "
+                f"{prog.eta(len(selected), n_target)}"
+            )
             history = pos.get("history") or []
             if not history:
                 continue
@@ -1295,6 +1324,7 @@ class CorpusGenerator:
                     "source": "onpolicy",
                 })
 
+        prog.close()
         jsonl_write(out_path, selected)
         print(f"\u2705 Generated {len(selected)} mate-in-1 positions (on-policy fallback)")
         return out_path
@@ -1319,10 +1349,16 @@ class CorpusGenerator:
         rng = random.Random(0)
         rng.shuffle(positions)
 
+        prog = ProgressLine()
         selected = []
-        for pos in positions:
+        for scanned, pos in enumerate(positions, 1):
             if len(selected) >= n_target:
                 break
+            prog.show(
+                f"Capture scan: {scanned:,}/{len(positions):,} positions | "
+                f"{len(selected):,}/{n_target:,} selected | "
+                f"{prog.eta(len(selected), n_target)}"
+            )
             history = pos.get("history") or []
             if not history:
                 continue
@@ -1349,6 +1385,7 @@ class CorpusGenerator:
                 "source": "onpolicy",
             })
 
+        prog.close()
         jsonl_write(out_path, selected)
         print(f"\u2705 Generated {len(selected)} capture positions (on-policy fallback)")
         return out_path
@@ -1391,17 +1428,25 @@ class CorpusGenerator:
 
         # 1. On-policy positions (generation)
         if wanted("onpolicy"):
-            print("\n=== Generating on-policy positions ===")
-            corpora['onpolicy'] = self.generate_onpolicy_positions(
-                n_games=n_onpolicy,
-                levels=levels or [0, 1, 2, 3],
-                seed=seed,
-                out_dir=out_dir,
-            )
+            path = out_dir / "onpolicy_positions.jsonl"
+            if reuse_if_complete("onpolicy", path, 1):
+                corpora['onpolicy'] = path
+            else:
+                print("\n=== Generating on-policy positions ===")
+                corpora['onpolicy'] = self.generate_onpolicy_positions(
+                    n_games=n_onpolicy,
+                    levels=levels or [0, 1, 2, 3],
+                    seed=seed,
+                    out_dir=out_dir,
+                )
 
         # 2. Mate-in-1 positions (from Lichess, or on-policy fallback)
         if wanted("mate1"):
-            if lichess_path:
+            path = out_dir / "probe_mate1.jsonl"
+            mate1_rows = MATE1_POSITIONS if lichess_path else 2000
+            if reuse_if_complete("mate1", path, mate1_rows):
+                corpora['mate1'] = path
+            elif lichess_path:
                 print("\n=== Extracting mate-in-1 positions ===")
                 corpora['mate1'] = self.extract_mate1_from_lichess(
                     lichess_path, out_dir=out_dir
@@ -1412,7 +1457,11 @@ class CorpusGenerator:
 
         # 3. Capture positions (from Lichess, or on-policy fallback)
         if wanted("captures"):
-            if lichess_path:
+            path = out_dir / "probe_captures.jsonl"
+            captures_rows = CAPTURES_POSITIONS if lichess_path else 2000
+            if reuse_if_complete("captures", path, captures_rows):
+                corpora['captures'] = path
+            elif lichess_path:
                 print("\n=== Extracting capture positions ===")
                 corpora['captures'] = self.extract_captures_from_lichess(
                     lichess_path, out_dir=out_dir
@@ -1423,28 +1472,40 @@ class CorpusGenerator:
 
         # 4. Endgame positions (generated)
         if wanted("endgames"):
-            print("\n=== Generating endgame positions ===")
-            corpora['endgames'] = self.generate_endgame_positions(out_dir=out_dir)
+            path = out_dir / "probe_endgames.jsonl"
+            if reuse_if_complete("endgames", path, 1):
+                corpora['endgames'] = path
+            else:
+                print("\n=== Generating endgame positions ===")
+                corpora['endgames'] = self.generate_endgame_positions(out_dir=out_dir)
 
         # 5. Conversion positions (C8)
         if wanted("conversion"):
-            print("\n=== Generating conversion positions ===")
-            corpora['conversion'] = self.generate_conversion_positions(
-                n_games=conversion_games,
-                min_per_threshold=min_per_threshold,
-                seed=seed,
-                out_dir=out_dir,
-            )
+            path = out_dir / "probe_conversion.jsonl"
+            if reuse_if_complete("conversion", path, 1):
+                corpora['conversion'] = path
+            else:
+                print("\n=== Generating conversion positions ===")
+                corpora['conversion'] = self.generate_conversion_positions(
+                    n_games=conversion_games,
+                    min_per_threshold=min_per_threshold,
+                    seed=seed,
+                    out_dir=out_dir,
+                )
 
         # 6. Promotion positions (C10)
         if wanted("promotion"):
-            print("\n=== Generating promotion positions ===")
-            corpora['promotion'] = self.generate_promotion_positions(
-                target=promotion_target,
-                lichess_path=lichess_path,
-                seed=seed,
-                out_dir=out_dir,
-            )
+            path = out_dir / "probe_promotion.jsonl"
+            if reuse_if_complete("promotion", path, promotion_target):
+                corpora['promotion'] = path
+            else:
+                print("\n=== Generating promotion positions ===")
+                corpora['promotion'] = self.generate_promotion_positions(
+                    target=promotion_target,
+                    lichess_path=lichess_path,
+                    seed=seed,
+                    out_dir=out_dir,
+                )
 
         # Write manifest
         manifest = {
@@ -1471,6 +1532,23 @@ class CorpusGenerator:
 LICHESS_NEEDED_CORPORA = {"mate1", "captures", "promotion"}
 
 
+def reuse_if_complete(name: str, path: Path, min_rows: int) -> bool:
+    """True when path already exists with at least min_rows rows.
+
+    Corpus writes are atomic, so an existing file always comes from a fully
+    completed former run; the row count guards against truncated or stale
+    (pre-dedup / smaller-target) outputs.
+    """
+    if not path.exists():
+        return False
+    rows = count_jsonl_rows(path)
+    if rows >= min_rows:
+        print(f"\u2705 {name}: {path} already complete ({rows} rows >= {min_rows}) \u2014 skipping")
+        return True
+    print(f"\U0001f501 {name}: {path} incomplete ({rows} rows < {min_rows}) \u2014 regenerating")
+    return False
+
+
 def resolve_lichess_path(args) -> Optional[str]:
     """Resolve the Lichess dataset path from CLI args, auto-downloading if needed."""
     if args.no_lichess:
@@ -1481,6 +1559,9 @@ def resolve_lichess_path(args) -> Optional[str]:
     if only is not None and not (only & LICHESS_NEEDED_CORPORA):
         return None
     try:
+        if args.lichess_source == "train":
+            from diag.common import ensure_training_dataset
+            return str(ensure_training_dataset(workers=args.workers))
         from diag.common import ensure_lichess_dataset
         return str(ensure_lichess_dataset(month=args.lichess_month))
     except Exception as exc:
@@ -1515,8 +1596,15 @@ def main():
     parser.add_argument("--lichess", type=str, default=None,
                         help="Path to Lichess dataset (.jsonl or .jsonl.gz); "
                              "default: auto-download to data/lichess_uci.jsonl.gz if missing")
-    parser.add_argument("--lichess-month", type=str, default="201403",
-                        help="Lichess dataset month (YYYYMM) to auto-download")
+    parser.add_argument("--lichess-month", type=str, default="201412",
+                        help="Lichess dataset month (YYYYMM) to auto-download "
+                             "(--lichess-source uci only)")
+    parser.add_argument("--lichess-source", type=str, default="train",
+                        choices=["train", "uci"],
+                        help="Auto-downloaded dataset: 'train' = the model's actual "
+                             "training corpus (dlouapre/lichess_2025-01_1M, exact "
+                             "seen/unseen split for P7); 'uci' = austindavis/lichess-uci "
+                             "monthly dumps")
     parser.add_argument("--no-lichess", action="store_true",
                         help="Do not use a Lichess dataset (fall back to on-policy extraction)")
     parser.add_argument("--onpolicy", type=int, default=2000,
