@@ -421,10 +421,148 @@ class CorpusGenerator:
         # workers sharing one GPU. Keep GPU generation in this process;
         # multiprocessing remains available for CPU-only generation.
         all_positions = []
+        
+        # For CUDA: use batched inference across games for maximum GPU utilization
         if self.device == "cuda":
-            for done, task in enumerate(tasks, start=1):
-                all_positions.extend(self._play_game_worker(task))
-                show_progress(done, started)
+            # Load model and probe_player in main process for GPU
+            from chess_hw import load_model
+            from .common import ProbePlayer
+            model = load_model(str(self.model_path), device=self.device)
+            probe_player = ProbePlayer(model, ChessTokenizer(), batch_size=1024, device=self.device)
+            
+            # Play all games with batched inference
+            # We'll collect positions from multiple games and batch them
+            batch_size = probe_player.batch_size
+            
+            # Initialize all games
+            games = []  # List of (board, model_color, opening_idx, level, seed)
+            for task in tasks:
+                opening_idx, level, seed, model_color = task
+                board = chess.Board()
+                openings = load_openings()
+                for uci in openings[opening_idx]:
+                    board.push_uci(uci)
+                games.append({
+                    'board': board,
+                    'model_color': model_color,
+                    'opening_idx': opening_idx,
+                    'level': level,
+                    'seed': seed,
+                    'engine': Engine(level=level, seed=f"engine-{seed}-{level}-{opening_idx}-{model_color}"),
+                    'positions': [],
+                    'done': False
+                })
+            
+            # Main game loop with batching
+            active_games = [g for g in games]
+            total_games = len(games)
+            done_count = 0
+            
+            while active_games:
+                # Collect positions where it's the model's turn
+                position_batch = []
+                game_indices = []
+                
+                for i, game in enumerate(active_games):
+                    board = game['board']
+                    model_color = game['model_color']
+                    
+                    if board.is_game_over() or board.ply() >= MAX_PLIES:
+                        # Game is done, skip
+                        continue
+                    
+                    # Check if it's model's turn
+                    if board.turn == chess.WHITE and model_color == "white" or \
+                       board.turn == chess.BLACK and model_color == "black":
+                        position_batch.append(board)
+                        game_indices.append(i)
+                    
+                    if len(position_batch) >= batch_size:
+                        break
+                
+                # If we have positions to process, batch them
+                if position_batch:
+                    # Get histories for all positions in the batch
+                    histories = [[m.uci() for m in b.move_stack] for b in position_batch]
+                    all_logits = probe_player._batch_logits(histories)
+                    
+                    # Process each position in the batch
+                    for idx, game_idx in enumerate(game_indices):
+                        board = position_batch[idx]
+                        game = active_games[game_idx]
+                        logits = all_logits[idx]
+                        
+                        # Get top-3 candidates
+                        probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()
+                        topk_indices = np.argsort(probs)[-3:][::-1]
+                        
+                        move = None
+                        attempt = 0
+                        for j, idx_token in enumerate(topk_indices, start=1):
+                            token = probe_player.tokenizer.id_to_token[int(idx_token)]
+                            try:
+                                move = board.parse_uci(token)
+                                attempt = j
+                                break
+                            except ValueError:
+                                continue
+                        
+                        if move is None:
+                            # Fallback
+                            legal = list(board.legal_moves)
+                            if legal:
+                                move = random.Random(f"fallback-{game['opening_idx']}-{board.ply()}").choice(legal)
+                                attempt = 0
+                        
+                        # Record position
+                        game['positions'].append({
+                            "history": [m.uci() for m in board.move_stack],
+                            "fen": board.fen(),
+                            "ply": board.ply(),
+                            "level": game['level'],
+                            "opening_id": game['opening_idx'],
+                            "model_color": game['model_color'],
+                            "in_check": board.is_check(),
+                            "n_legal": board.legal_moves.count(),
+                            "chosen_move": move.uci() if move else None,
+                            "chosen_rank": attempt,
+                        })
+                        
+                        # Apply the move
+                        board.push(move)
+                    
+                    # Clear the batch
+                    position_batch = []
+                    game_indices = []
+                else:
+                    # No model turns, play engine moves for all games
+                    for game in active_games:
+                        board = game['board']
+                        model_color = game['model_color']
+                        
+                        if board.is_game_over() or board.ply() >= MAX_PLIES:
+                            continue
+                        
+                        # Check if it's engine's turn
+                        if not (board.turn == chess.WHITE and model_color == "white" or \
+                                board.turn == chess.BLACK and model_color == "black"):
+                            engine_move = game['engine'].best_move(board)
+                            if engine_move:
+                                board.push(engine_move)
+                
+                # Check for completed games and update progress
+                new_active_games = []
+                for game in active_games:
+                    if game['board'].is_game_over() or game['board'].ply() >= MAX_PLIES:
+                        all_positions.extend(game['positions'])
+                        done_count += 1
+                    else:
+                        new_active_games.append(game)
+                
+                active_games = new_active_games
+                show_progress(done_count, started)
+            
+            print()
         else:
             with ProcessPoolExecutor(max_workers=self.workers) as executor:
                 futures = {executor.submit(self._play_game_worker, task): task for task in tasks}
