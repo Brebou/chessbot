@@ -251,7 +251,13 @@ class CorpusGenerator:
     - Atomic file writing
     """
     
-    def __init__(self, model_path: str, device: str = "cpu", workers: int = 8):
+    def __init__(
+        self,
+        model_path: str,
+        device: str = "cpu",
+        workers: int = 8,
+        batch_size: Optional[int] = None,
+    ):
         """Initialize the corpus generator.
         
         Args:
@@ -264,8 +270,8 @@ class CorpusGenerator:
         self.workers = workers
         self.tokenizer = ChessTokenizer()
         
-        # Auto-adjust batch size for GPU
-        batch_size = 1024 if device == "cuda" or (device is not None and "cuda" in device) else 64
+        # A larger batch improves GPU utilization; callers can lower it to avoid OOM.
+        batch_size = batch_size or (1024 if device == "cuda" else 64)
         
         # Load model and create players
         self.model = load_model(str(model_path), device=device)
@@ -347,7 +353,7 @@ class CorpusGenerator:
         
         return positions
     
-    def generate_onpolicy_positions(self, n_games: int = 2000, levels: list = [0, 1, 2, 3], 
+    def generate_onpolicy_positions(self, n_games: int = 2000, levels: list = [0, 1, 2, 3],
                                      seed: int = 0, out_dir: str = "results/corpus") -> Path:
         """Generate on-policy positions by playing model vs engine.
         
@@ -402,10 +408,7 @@ class CorpusGenerator:
         # For CUDA: use batched inference across games for maximum GPU utilization
         if self.device == "cuda":
             # Load model and probe_player in main process for GPU
-            from chess_hw import load_model
-            from .common import ProbePlayer
-            model = load_model(str(self.model_path), device=self.device)
-            probe_player = ProbePlayer(model, ChessTokenizer(), batch_size=1024, device=self.device)
+            probe_player = self.probe_player
             
             # Play all games with batched inference
             # We'll collect positions from multiple games and batch them
@@ -470,8 +473,7 @@ class CorpusGenerator:
                         logits = all_logits[idx]
                         
                         # Get top-3 candidates
-                        probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()
-                        topk_indices = np.argsort(probs)[-3:][::-1]
+                        topk_indices = np.argsort(logits)[-3:][::-1]
                         
                         move = None
                         attempt = 0
@@ -782,8 +784,13 @@ class CorpusGenerator:
         # In production, we'd want to generate a real history
         return []
     
-    def generate_all_corpora(self, lichess_path: Optional[str] = None,
-                             n_onpolicy: int = 2000, out_dir: str = "results/corpus") -> dict:
+    def generate_all_corpora(
+        self,
+        lichess_path: Optional[str] = None,
+        n_onpolicy: int = 2000,
+        levels: Optional[list] = None,
+        out_dir: str = "results/corpus",
+    ) -> dict:
         """Generate all corpora needed for C1-C14 evaluation.
         
         Args:
@@ -802,7 +809,9 @@ class CorpusGenerator:
         # 1. On-policy positions (generation)
         print("\n=== Generating on-policy positions ===")
         corpora['onpolicy'] = self.generate_onpolicy_positions(
-            n_games=n_onpolicy, out_dir=out_dir
+            n_games=n_onpolicy,
+            levels=levels or [0, 1, 2, 3],
+            out_dir=out_dir,
         )
         
         # 2. Mate-in-1 positions (from Lichess if available)
@@ -846,6 +855,20 @@ def main():
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
                         help="Device for model")
     parser.add_argument("--workers", type=int, default=8, help="Number of workers")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="CUDA inference batch size (default: 1024; lower if GPU memory is insufficient)",
+    )
+    parser.add_argument(
+        "--levels",
+        nargs="+",
+        type=int,
+        default=[0, 1, 2, 3],
+        choices=range(4),
+        help="Engine levels for on-policy games; level 0 is fastest",
+    )
     parser.add_argument("--out", type=str, default="results/corpus",
                         help="Output directory")
     parser.add_argument("--lichess", type=str, default=None,
@@ -855,12 +878,18 @@ def main():
     args = parser.parse_args()
     
     # Create generator
-    generator = CorpusGenerator(args.model, device=args.device, workers=args.workers)
+    generator = CorpusGenerator(
+        args.model,
+        device=args.device,
+        workers=args.workers,
+        batch_size=args.batch_size,
+    )
     
     # Generate all corpora
     generator.generate_all_corpora(
         lichess_path=args.lichess,
         n_onpolicy=args.onpolicy,
+        levels=args.levels,
         out_dir=args.out
     )
 
