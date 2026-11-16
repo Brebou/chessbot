@@ -226,10 +226,13 @@ class CorpusGenerator:
         self.workers = workers
         self.tokenizer = ChessTokenizer()
         
+        # Auto-adjust batch size for GPU
+        batch_size = 1024 if device == "cuda" or (device is not None and "cuda" in device) else 64
+        
         # Load model and create players
         self.model = load_model(str(model_path), device=device)
         self.model_player = ModelPlayer(self.model, name="model")
-        self.probe_player = ProbePlayer(self.model, self.tokenizer, device=device)
+        self.probe_player = ProbePlayer(self.model, self.tokenizer, batch_size=batch_size, device=device)
         
         # Built-in engine for analysis
         self.engine = Engine(level=3, seed=42)
