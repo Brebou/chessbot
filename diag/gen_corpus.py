@@ -29,7 +29,6 @@ from typing import Optional, Callable
 
 import chess
 import numpy as np
-import torch
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -267,13 +266,7 @@ class CorpusGenerator:
         
         # Load model and create players
         self.model = load_model(str(model_path), device=device)
-        self.model_player = ModelPlayer(self.model, name="model")
-        self.probe_player = ProbePlayer(
-            self.model,
-            self.tokenizer,
-            batch_size=batch_size,
-            device=torch.device(device),
-        )
+        self.probe_player = ProbePlayer(self.model, self.tokenizer, batch_size=batch_size, device=device)
         
         # Built-in engine for analysis
         self.engine = Engine(level=3, seed=42)

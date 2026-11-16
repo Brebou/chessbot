@@ -48,11 +48,10 @@ class ProbePlayer:
     """
     
     def __init__(self, model: ChessGPT, tokenizer: ChessTokenizer, 
-                 batch_size: int = 64, device: Optional[str | torch.device] = None):
+                 batch_size: int = 64, device: Optional[str] = None):
         self.model = model.eval()
         self.tokenizer = tokenizer
-        selected_device = device or next(model.parameters()).device
-        self.device = torch.device(selected_device)
+        self.device = device or next(model.parameters()).device
         
         # Auto-detect GPU and set optimal batch size
         if self.device.type == 'cuda':
