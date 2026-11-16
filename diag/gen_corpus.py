@@ -299,6 +299,7 @@ class CorpusGenerator:
         
         # Play the game
         positions = []
+        move_count = 0
         
         while not board.is_game_over() and board.ply() < MAX_PLIES:
             # Model's turn
