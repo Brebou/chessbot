@@ -20,6 +20,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from chess_hw import ChessGPT, ChessTokenizer, load_model
+from chess_hw.play import MoveChoice
 
 # Constants
 MAX_PLIES = 250
@@ -228,6 +229,30 @@ class ProbePlayer:
         
         return result
     
+
+    def choose(self, board: chess.Board) -> "MoveChoice":
+        """Choose a move like ModelPlayer but using batched inference.
+        
+        This method mimics chess_hw.play.ModelPlayer.choose() but uses
+        the optimized batch inference from ProbePlayer.
+        
+        Args:
+            board: Current chess board position
+            
+        Returns:
+            MoveChoice with move and attempt number (1, 2, 3, or 0)
+        """
+        history = [m.uci() for m in board.move_stack]
+        candidates = self.get_topk(history, k=3)[0]
+        
+        for attempt, tok in enumerate(candidates, start=1):
+            try:
+                mv = board.parse_uci(tok)
+                return MoveChoice(mv, attempt)
+            except ValueError:
+                continue
+        return MoveChoice(None, 0)
+
     def choose_with_probs(self, board: chess.Board) -> Tuple[Optional[chess.Move], int, dict]:
         """Choose a move like ModelPlayer but return probabilities for all legal moves.
         

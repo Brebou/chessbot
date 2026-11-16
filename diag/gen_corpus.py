@@ -21,7 +21,6 @@ import json
 import os
 import random
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Callable
@@ -34,9 +33,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from chess_hw import ChessTokenizer, Engine, load_model
 from chess_hw.match import select_openings, load_openings, MAX_PLIES
-from chess_hw.play import ModelPlayer
 
 from .common import ProbePlayer, replay, material_value, material_diff
+
+from multiprocessing import get_context
+from chess_hw.play import MoveChoice
+
+# Worker state for multiprocessing
+_WORKER_STATE = {}
+
+
+def _init_worker(model_path: str, device: str):
+    """Initialize worker with model and probe_player for GPU optimization."""
+    import torch
+    torch.set_num_threads(1)
+    from chess_hw import load_model, ChessTokenizer
+    from .common import ProbePlayer
+    
+    _WORKER_STATE['model'] = load_model(model_path, device=device)
+    _WORKER_STATE['tokenizer'] = ChessTokenizer()
+    # Use large batch size for GPU, small for CPU
+    batch_size = 1024 if device == "cuda" else 64
+    _WORKER_STATE['probe_player'] = ProbePlayer(
+        _WORKER_STATE['model'], 
+        _WORKER_STATE['tokenizer'], 
+        batch_size=batch_size,
+        device=device
+    )
+    _WORKER_STATE['device'] = device
+
+
+def _get_probe_player():
+    """Get the probe_player for this worker."""
+    return _WORKER_STATE['probe_player']
+
 
 
 # ---------------------------------------------------------------------------
@@ -237,13 +267,16 @@ class CorpusGenerator:
         # Built-in engine for analysis
         self.engine = Engine(level=3, seed=42)
     
-    def _play_game_worker(self, args) -> list:
-        """Worker function for parallel game playing."""
-        opening_idx, level, seed, model_color = args
+    @staticmethod
+    def _play_game_task(task) -> list:
+        """Static task function for parallel game playing.
         
-        # Set thread count for torch
-        import torch
-        torch.set_num_threads(1)
+        Uses worker-local probe_player for optimized GPU inference.
+        """
+        opening_idx, level, seed, model_color = task
+        
+        # Get the worker's probe_player
+        probe_player = _get_probe_player()
         
         # Load opening
         openings = load_openings()
@@ -257,27 +290,16 @@ class CorpusGenerator:
         # Create engine player
         engine = Engine(level=level, seed=f"engine-{seed}-{level}-{opening_idx}-{model_color}")
         
-        # Set up players
-        if model_color == "white":
-            white_player = self.model_player
-            black_player = ModelPlayer(self.model, name="engine")
-            black_player.model = None  # Will use engine
-        else:
-            white_player = ModelPlayer(self.model, name="engine")
-            white_player.model = None
-            black_player = self.model_player
-        
         # Play the game
         positions = []
-        move_count = 0
         
         while not board.is_game_over() and board.ply() < MAX_PLIES:
             # Model's turn
             if board.turn == chess.WHITE and model_color == "white" or \
                board.turn == chess.BLACK and model_color == "black":
                 
-                # Get model's move with attempt info
-                choice = self.model_player.choose(board)
+                # Get model's move using optimized ProbePlayer
+                choice = probe_player.choose(board)
                 
                 if choice.move:
                     move = choice.move
@@ -348,15 +370,19 @@ class CorpusGenerator:
                 tasks.append((oid, level, seed, "white"))
                 tasks.append((oid, level, seed, "black"))
         
-        # Play games in parallel
+        # Play games in parallel with worker initialization
         all_positions = []
         
-        with ProcessPoolExecutor(max_workers=self.workers) as executor:
-            futures = {executor.submit(self._play_game_worker, task): task for task in tasks}
+        ctx = get_context("spawn")
+        with ctx.Pool(self.workers, initializer=_init_worker, 
+                      initargs=(str(self.model_path), self.device)) as pool:
+            # Submit all tasks
+            futures = [pool.apply_async(CorpusGenerator._play_game_task, (task,)) for task in tasks]
             
-            for future in as_completed(futures):
+            # Collect results
+            for future in futures:
                 try:
-                    positions = future.result()
+                    positions = future.get()
                     all_positions.extend(positions)
                 except Exception as e:
                     print(f"Error in game: {e}", file=sys.stderr)
