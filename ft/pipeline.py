@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ft.common.games_io import read_games, write_games
+from ft.common.serialize import jsonl_count
 from ft.data.download import ensure_elite_dataset
 from ft.data.select_games import select_games
 
@@ -125,19 +126,31 @@ def run_pipeline(cfg: PipelineConfig, annotate_fn=None) -> dict:
     if positions_path.exists() and not cfg.force:
         print(f"✅ {positions_path} exists, skipping Phase B")
     else:
+        from diag.common import ProgressLine
+
+        print(f"⏳ Phase B: replaying games and sampling positions "
+              f"(minutes)...")
         n = sample_positions(read_games(paths["games"]), paths["positions"],
-                             seed=cfg.seed, workers=cfg.workers)
-        print(f"✅ Phase B: {n} positions -> {paths['positions']}")
+                             seed=cfg.seed, workers=cfg.workers,
+                             progress=ProgressLine())
+        print(f"\n✅ Phase B: {n} positions -> {paths['positions']}")
 
     annotations_path = Path(paths["annotations"])
     if annotations_path.exists() and not cfg.force:
         print(f"✅ {annotations_path} exists, skipping Phase C")
     else:
+        from diag.common import ProgressLine
+
+        n_positions = jsonl_count(paths["positions"])
+        print(f"⏳ Phase C: annotating {n_positions} positions, depth {cfg.depth}, "
+              f"engine {cfg.stockfish}, {cfg.workers} workers - THE LONG STEP "
+              f"(~2 searches/position; live progress on the console and rows "
+              f"stream into {annotations_path}.tmp as they complete)")
         n = annotate_positions(paths["positions"], paths["annotations"],
                                engine_path=cfg.stockfish, depth=cfg.depth,
                                join_path=cfg.join_path, workers=cfg.workers,
-                               annotate_fn=annotate_fn)
-        print(f"✅ Phase C: {n} annotations -> {paths['annotations']}")
+                               progress=ProgressLine(), annotate_fn=annotate_fn)
+        print(f"\n✅ Phase C: {n} annotations -> {paths['annotations']}")
 
     tb_rows_path = None
     if cfg.tb_dir:
