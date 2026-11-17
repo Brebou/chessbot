@@ -11,7 +11,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ft.common.games_io import read_games, write_games
-from ft.pipeline import PipelineConfig, run_pipeline
+from ft.data.download import convert_parquet_to_games
+from ft.pipeline import PipelineConfig, _phase_a_games, run_pipeline
 
 
 @pytest.fixture(scope="module")
@@ -120,3 +121,84 @@ def test_pipeline_config_cli_roundtrip():
                               "--min-elo", "2400", "--force", "true"])
     cfg = PipelineConfig.from_args(args)
     assert cfg.n_games == 10 and cfg.min_elo == 2400 and cfg.force is True
+
+
+def test_select_games_treats_elo_zero_as_unrated(tmp_path):
+    from ft.data.select_games import select_games
+
+    src = tmp_path / "src.jsonl"
+    rows = [{"moves": "e2e4 e7e5", "WhiteElo": 0, "BlackElo": 2450},
+            {"moves": "d2d4 d7d5", "WhiteElo": 2500, "BlackElo": 0},
+            {"moves": "c2c4 c7c5", "WhiteElo": 2600, "BlackElo": 2500}]
+    with open(src, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    games, _ = select_games(str(src), 10, strict_elo=True, min_elo=2400)
+    assert games == ["c2c4 c7c5"]
+    games0, _ = select_games(str(src), 10, min_elo=0)
+    assert len(games0) == 3
+
+
+def test_convert_parquet_to_games(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    shard = tmp_path / "s.parquet"
+    pq.write_table(pa.table({"text": pa.array([
+        "d2d4 d7d5  ", "", "b1c3 b8c6"])}), shard)
+    out = tmp_path / "games.jsonl.gz"
+    n = convert_parquet_to_games([shard], str(out))
+    assert n == 2
+    assert read_games(str(out)) == ["d2d4 d7d5", "b1c3 b8c6"]
+
+
+def test_phase_a_fallback_to_elite(tmp_path, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    fake_shard = tmp_path / "fake.parquet"
+    pq.write_table(pa.table({"text": pa.array(["e2e4 e7e5", "d2d4 d7d5"])}),
+                   fake_shard)
+    monkeypatch.setattr("ft.pipeline.ensure_elite_dataset",
+                        _fake_ensure(tmp_path, fake_shard))
+    cfg = PipelineConfig(dataset=str(tmp_path / "absent.jsonl"), work_dir=str(tmp_path),
+                         n_games=2, min_elo=2400, auto_download=True)
+    games, stats, source = _phase_a_games(cfg)
+    assert games == ["e2e4 e7e5", "d2d4 d7d5"]
+    assert "elite" in str(source) or "fake" in str(source)
+
+
+def _fake_ensure(tmp_path, shard):
+    from ft.data.download import convert_parquet_to_games
+
+    def _ensure(out, *, n_shards=1, n_games=0, force=False):
+        convert_parquet_to_games([shard], out, n_games=n_games)
+        return out, 2
+    return _ensure
+
+
+def test_pipeline_aborts_with_empty_source(tmp_path, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    empty_shard = tmp_path / "empty.parquet"
+    pq.write_table(pa.table({"text": pa.array([], type=pa.string())}), empty_shard)
+    monkeypatch.setattr("ft.pipeline.ensure_elite_dataset",
+                        _fake_ensure(tmp_path, empty_shard))
+    cfg = PipelineConfig(dataset="", work_dir=str(tmp_path), n_games=10,
+                         auto_download=True, stockfish="")
+    with pytest.raises(SystemExit, match="Phase A kept 0 games"):
+        run_pipeline(cfg, annotate_fn=_stub_annotate)
+
+
+def test_pipeline_aborts_on_empty_games_file(tmp_path):
+    write_games(str(tmp_path / "games.jsonl"), [])  # empty output from a failed run
+    cfg = PipelineConfig(dataset="", work_dir=str(tmp_path), auto_download=False,
+                         stockfish="")
+    with pytest.raises(SystemExit, match="0 games"):
+        run_pipeline(cfg, annotate_fn=_stub_annotate)
+
+
+def test_download_module_importable():
+    import ft.data.download as d
+    assert d.ELITE_DEFAULT_SHARDS == 6
