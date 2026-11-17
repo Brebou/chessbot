@@ -23,6 +23,8 @@ first; uncovered FENs go to Stockfish.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -31,7 +33,7 @@ import chess
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ft.common.serialize import jsonl_read, jsonl_write
+from ft.common.serialize import jsonl_read
 
 MATE_CP = 10000
 
@@ -177,33 +179,78 @@ def annotate_task(task):
     return row
 
 
+def _count_valid_lines(path: Path) -> int:
+    """Number of complete jsonl rows; a torn last line (crash mid-write) does
+    not count and will be overwritten on resume."""
+    n = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                break
+            n += 1
+    return n
+
+
 def annotate_positions(positions_path: str, out: str, *, engine_path: str = "stockfish",
                        depth: int = 14, join_path: str = "", workers: int = 8,
                        progress=None, annotate_fn: Optional[Callable] = None) -> int:
     """`annotate_fn` (optional) replaces the Stockfish pools (used by tests and
     the orchestrator); it maps fen -> partial annotation dict {best_uci,
     cp_best, cp_second, second_uci?, mate_root?} and the rest of the row is
-    filled here with the same schema as the pool worker."""
-    rows = list(jsonl_read(positions_path))
-    out_rows = []
-    if annotate_fn is not None:
-        for i, r in enumerate(rows):
-            out_rows.append(_annotate_row(r, annotate_fn(r["fen_before"])))
-            if progress is not None:
-                progress.show(f"annotate: {len(out_rows)}/{len(rows)}")
-    else:
-        from multiprocessing import get_context
+    filled here with the same schema as the pool worker.
 
-        tasks = [(r["fen_before"], r["uci_played"], engine_path, depth, join_path)
-                 for r in rows]
-        ctx = get_context("spawn")
-        with ctx.Pool(workers) as pool:
-            for res in pool.imap(annotate_task, tasks, chunksize=4):
-                out_rows.append(res)
+    Rows are written incrementally to `<out>.tmp` (renamed at the end), so a
+    multi-hour run stays observable and restartable: with the positions file
+    unchanged, a rerun parses the valid prefix of the tmp file and only
+    annotates what is missing. A partial tmp file is tolerated (torn last line
+    is ignored); delete <out>.tmp to start over.
+    """
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    resumed = _count_valid_lines(tmp) if tmp.exists() else 0
+    if tmp.exists() and not resumed:
+        tmp.unlink()
+    if resumed:
+        print(f"↩️ Phase C resume: {resumed} rows already in {tmp}, "
+              f"skipping those positions")
+    rows_iter = jsonl_read(positions_path)
+    if resumed:
+        import itertools
+
+        rows_iter = itertools.islice(rows_iter, resumed, None)
+    n = 0
+    with open(tmp, "a", encoding="utf-8") as f:
+        def _emit(row: dict) -> None:
+            nonlocal n
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+            n += 1
+            if n % 10_000 == 0:
+                f.flush()
+
+        if annotate_fn is not None:
+            for r in rows_iter:
+                _emit(_annotate_row(r, annotate_fn(r["fen_before"])))
                 if progress is not None:
-                    progress.show(f"annotate: {len(out_rows)}/{len(tasks)}")
-    jsonl_write(out, out_rows)
-    return len(out_rows)
+                    progress.show(f"annotate: {resumed + n}")
+        else:
+            from multiprocessing import get_context
+
+            tasks = [(r["fen_before"], r["uci_played"], engine_path, depth, join_path)
+                     for r in rows_iter]
+            ctx = get_context("spawn")
+            with ctx.Pool(workers) as pool:
+                for res in pool.imap(annotate_task, tasks, chunksize=4):
+                    _emit(res)
+                    if progress is not None:
+                        progress.show(f"annotate: {resumed + n}/{resumed + len(tasks)}")
+    os.replace(tmp, out_path)
+    return resumed + n
 
 
 def _annotate_row(position_row: dict, block: Dict) -> dict:
