@@ -23,7 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def parse_elo(value: object) -> Optional[int]:
-    """Strict: ints, floats, integer strings; '?'/'None'/garbage -> None."""
+    """Strict: ints, floats, integer strings; '?'/'None'/garbage -> None.
+    An Elo of 0 is the austindavis export's placeholder for UNRATED - it
+    parses to 0 and is then rejected by any min_elo > 0 threshold, and kept
+    only when no Elo filter is requested (min_elo=0)."""
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -40,6 +43,7 @@ class SelectionStats:
     kept: int = 0
     rejected_elo: int = 0
     rejected_malformed: int = 0
+    rejected_elo_missing: int = 0  # of rejected_elo: the fields failed to parse
 
     @property
     def rejection_rate(self) -> float:
@@ -99,6 +103,7 @@ def select_games(dataset: str, n_games: int, *, strict_elo: bool = False,
             white, black = _elo_pair(row)
             if white is None or black is None:
                 stats.rejected_elo += 1
+                stats.rejected_elo_missing += 1
                 if strict_elo:
                     continue
             elif min(white, black) < min_elo:
@@ -108,12 +113,15 @@ def select_games(dataset: str, n_games: int, *, strict_elo: bool = False,
         stats.kept += 1
         if len(games) >= n_games:
             stopped = True
-    if strict_elo and stats.kept > 0 and stats.rejection_rate > parser_reject_limit:
+    if strict_elo and stats.kept > 0 \
+            and stats.rejected_elo_missing > 0 \
+            and stats.rejected_elo_missing / (stats.rejected_elo_missing + stats.kept) \
+            > parser_reject_limit:
         raise ValueError(
-            f"elite Elo rejection rate {stats.rejection_rate:.0%} exceeds "
+            f"elite Elo rejection rate {stats.rejected_elo_missing / (stats.rejected_elo_missing + stats.kept):.0%} exceeds "
             f"{parser_reject_limit:.0%}: the Elo parser does not match this "
-            f"dump format ({stats.rejected_elo} rejected over "
-            f"{stats.rejected_elo + stats.kept} games with moves)")
+            f"dump format ({stats.rejected_elo_missing} rejected over "
+            f"{stats.rejected_elo_missing + stats.kept} games with moves)")
     return games, stats
 
 
