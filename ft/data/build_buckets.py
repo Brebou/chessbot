@@ -17,10 +17,18 @@ piece binning is the structural equalizer.
 
 from __future__ import annotations
 
+import argparse
 import random
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 
 import chess
 
@@ -224,3 +232,30 @@ def build_bucket_dataset(games: List[str], positions_path: str,
     counts = count_report(rows)
     print(f"✅ wrote {len(rows)} rows to {out_path}: {counts}")
     return counts
+
+
+def main() -> None:
+    from ft.common.games_io import read_games
+
+    parser = argparse.ArgumentParser(
+        description="Phase E - bucket assignment, dedup, final mix")
+    parser.add_argument("--games", required=True, help="Phase A output jsonl")
+    parser.add_argument("--positions", required=True, help="Phase B output jsonl")
+    parser.add_argument("--annotations", required=True, help="Phase C output jsonl")
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--tb-rows", default="", help="Phase D output jsonl")
+    parser.add_argument("--target-total", type=int, default=0,
+                        help="0 = keep all classified rows")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+    games = read_games(args.games)
+    counts = build_bucket_dataset(games, args.positions, args.annotations,
+                                  args.out, tb_rows_path=args.tb_rows,
+                                  target_total=args.target_total or None,
+                                  seed=args.seed, force=args.force)
+    print(f"✅ mix: {sum(counts.values())} rows {counts}")
+
+
+if __name__ == "__main__":
+    main()

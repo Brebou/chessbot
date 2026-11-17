@@ -22,7 +22,15 @@ first; uncovered FENs go to Stockfish.
 
 from __future__ import annotations
 
+import argparse
+import sys
+from pathlib import Path
+from typing import Callable, Dict, Optional
+
 import chess
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from ft.common.serialize import jsonl_read, jsonl_write
 
 MATE_CP = 10000
@@ -171,18 +179,74 @@ def annotate_task(task):
 
 def annotate_positions(positions_path: str, out: str, *, engine_path: str = "stockfish",
                        depth: int = 14, join_path: str = "", workers: int = 8,
-                       progress=None) -> int:
-    from multiprocessing import get_context
-
+                       progress=None, annotate_fn: Optional[Callable] = None) -> int:
+    """`annotate_fn` (optional) replaces the Stockfish pools (used by tests and
+    the orchestrator); it maps fen -> partial annotation dict {best_uci,
+    cp_best, cp_second, second_uci?, mate_root?} and the rest of the row is
+    filled here with the same schema as the pool worker."""
     rows = list(jsonl_read(positions_path))
-    tasks = [(r["fen_before"], r["uci_played"], engine_path, depth, join_path)
-             for r in rows]
     out_rows = []
-    ctx = get_context("spawn")
-    with ctx.Pool(workers) as pool:
-        for res in pool.imap(annotate_task, tasks, chunksize=4):
-            out_rows.append(res)
+    if annotate_fn is not None:
+        for i, r in enumerate(rows):
+            out_rows.append(_annotate_row(r, annotate_fn(r["fen_before"])))
             if progress is not None:
-                progress.show(f"annotate: {len(out_rows)}/{len(tasks)}")
+                progress.show(f"annotate: {len(out_rows)}/{len(rows)}")
+    else:
+        from multiprocessing import get_context
+
+        tasks = [(r["fen_before"], r["uci_played"], engine_path, depth, join_path)
+                 for r in rows]
+        ctx = get_context("spawn")
+        with ctx.Pool(workers) as pool:
+            for res in pool.imap(annotate_task, tasks, chunksize=4):
+                out_rows.append(res)
+                if progress is not None:
+                    progress.show(f"annotate: {len(out_rows)}/{len(tasks)}")
     jsonl_write(out, out_rows)
     return len(out_rows)
+
+
+def _annotate_row(position_row: dict, block: Dict) -> dict:
+    fen = position_row["fen_before"]
+    try:
+        played = chess.Board(fen).parse_uci(position_row["uci_played"]).uci()
+    except ValueError:
+        return {"fen": fen, "uci_played": position_row["uci_played"],
+                "invalid": True}
+    row = {block_key: block_value for block_key, block_value in block.items()}
+    row.update({"fen": fen, "uci_played": played,
+                "cp_root": block["cp_best"],
+                "cp_played_after": block.get("cp_played_after", block["cp_best"]),
+                "is_check_before": chess.Board(fen).is_check(),
+                "sanity": True})
+    if "cp_played_after" in block:
+        row["margin"] = row["cp_best"] - row["cp_played_after"]
+    else:
+        row["margin"] = 0
+        row["cp_played_after"] = row["cp_best"]
+    row.setdefault("second_uci", None)
+    row.setdefault("mate_root", None)
+    return row
+
+
+def main() -> None:
+    from diag.common import ProgressLine
+
+    parser = argparse.ArgumentParser(
+        description="Phase C - Stockfish annotation pass (depth, MultiPV 2)")
+    parser.add_argument("--positions", required=True, help="Phase B output jsonl")
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--engine", default="stockfish")
+    parser.add_argument("--depth", type=int, default=14)
+    parser.add_argument("--join", default="",
+                        help="optional Lichess chess-position-evaluations index")
+    parser.add_argument("--workers", type=int, default=8)
+    args = parser.parse_args()
+    n = annotate_positions(args.positions, args.out, engine_path=args.engine,
+                           depth=args.depth, join_path=args.join,
+                           workers=args.workers, progress=ProgressLine())
+    print(f"\n✅ {n} annotations -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()

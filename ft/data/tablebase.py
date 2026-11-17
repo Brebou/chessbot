@@ -17,8 +17,16 @@ the side to move is winning, or None when unprobed.
 
 from __future__ import annotations
 
+import argparse
 import random
+import sys
 from typing import Dict, List, Optional, Tuple
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 
 import chess
 
@@ -219,3 +227,24 @@ def build_tb_rows(tb_dir: str, out: str, *, per_type: int = 15000,
     from ft.common.serialize import jsonl_write
     jsonl_write(out, rows)
     return len(rows)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Phase D - Syzygy tablebase final lines")
+    parser.add_argument("--tb-dir", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--per-type", type=int, default=15_000)
+    parser.add_argument("--dtz-lo", type=int, default=1)
+    parser.add_argument("--dtz-hi", type=int, default=30)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--shapes", nargs="+", default=list(TB_TYPES))
+    args = parser.parse_args()
+    n = build_tb_rows(args.tb_dir, args.out, per_type=args.per_type,
+                      dtz_lo=args.dtz_lo, dtz_hi=args.dtz_hi, seed=args.seed,
+                      shapes=tuple(args.shapes))
+    print(f"✅ {n} tb rows -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()

@@ -50,6 +50,33 @@ LEGALITY_REGRESSION_FLOOR = 0.05
 CE_REGRESSION = 0.05
 
 
+def _add_dataclass_args(cls, parser: argparse.ArgumentParser) -> None:
+    for f in fields(cls):
+        opt = "--" + f.name.replace("_", "-")
+        default = f.default
+        if isinstance(default, bool):
+            parser.add_argument(opt, type=lambda s: s.lower() in ("1", "true", "yes"),
+                                default=default)
+        elif isinstance(default, tuple):
+            parser.add_argument(opt, nargs="+", type=int, default=list(default))
+        elif isinstance(default, int) and not isinstance(default, bool):
+            parser.add_argument(opt, type=int, default=default)
+        elif isinstance(default, float):
+            parser.add_argument(opt, type=float, default=default)
+        else:
+            parser.add_argument(opt, type=str, default=default)
+
+
+def _from_args_values(cls, args: argparse.Namespace) -> dict:
+    kwargs = {}
+    for f in fields(cls):
+        val = getattr(args, f.name)
+        if isinstance(f.default, tuple):
+            val = tuple(val)
+        kwargs[f.name] = val
+    return kwargs
+
+
 @dataclass
 class FTSFTConfig:
     model_path: str = "base_model"
@@ -86,30 +113,11 @@ class FTSFTConfig:
 
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
-        for f in fields(cls):
-            opt = "--" + f.name.replace("_", "-")
-            default = f.default
-            if isinstance(default, bool):
-                parser.add_argument(opt, type=lambda s: s.lower() in ("1", "true", "yes"),
-                                    default=default)
-            elif isinstance(default, tuple):
-                parser.add_argument(opt, nargs="+", type=int, default=list(default))
-            elif isinstance(default, int) and not isinstance(default, bool):
-                parser.add_argument(opt, type=int, default=default)
-            elif isinstance(default, float):
-                parser.add_argument(opt, type=float, default=default)
-            else:
-                parser.add_argument(opt, type=str, default=default)
+        _add_dataclass_args(cls, parser)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "FTSFTConfig":
-        kwargs = {}
-        for f in fields(cls):
-            val = getattr(args, f.name)
-            if isinstance(f.default, tuple):
-                val = tuple(val)
-            kwargs[f.name] = val
-        return cls(**kwargs)
+        return cls(**_from_args_values(cls, args))
 
 
 def legality_aborted(base_fixtures: Optional[dict], cand_fixtures: Optional[dict],
@@ -147,6 +155,9 @@ class FTSFTTrainer:
         self.model = load_model(cfg.model_path, device=self.device)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=cfg.lr,
                                            weight_decay=cfg.weight_decay)
+        if not Path(cfg.mix_path).exists():
+            sys.exit(f"❌ mix not found: {cfg.mix_path} - build it first with "
+                     f"`uv run ft/pipeline.py --dataset <lichess dump> ...`")
         self.train_items, self.val_items = load_items(cfg.mix_path, self.tokenizer)
         buckets: Dict[str, int] = {}
         for it in self.train_items:

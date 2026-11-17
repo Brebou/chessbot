@@ -16,8 +16,13 @@ the cheap rules (ply >= MIN_PLY, non-terminal positions).
 
 from __future__ import annotations
 
+import argparse
 import random
+import sys
+from pathlib import Path
 from typing import Dict, List, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import chess
 
@@ -100,3 +105,25 @@ def sample_positions(games: List[str], out: str, *, seed: int, workers: int = 8,
     rows.sort(key=lambda r: (r["game_id"], r["ply"]))
     jsonl_write(out, rows)
     return len(rows)
+
+
+def main() -> None:
+    from diag.common import ProgressLine
+    from ft.common.games_io import read_games
+
+    parser = argparse.ArgumentParser(
+        description="Phase B - position sampling with piece-count binning")
+    parser.add_argument("--games", required=True, help="Phase A output jsonl")
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
+    games = read_games(args.games)
+    print(f"sampled from {len(games)} games")
+    n = sample_positions(games, args.out, seed=args.seed, workers=args.workers,
+                         progress=ProgressLine())
+    print(f"\n\u2705 {n} positions -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()

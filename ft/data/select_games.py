@@ -11,10 +11,15 @@ all: use `min_elo=0` there.
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def parse_elo(value: object) -> Optional[int]:
@@ -110,3 +115,28 @@ def select_games(dataset: str, n_games: int, *, strict_elo: bool = False,
             f"dump format ({stats.rejected_elo} rejected over "
             f"{stats.rejected_elo + stats.kept} games with moves)")
     return games, stats
+
+
+def main() -> None:
+    from ft.common.games_io import write_games
+
+    parser = argparse.ArgumentParser(
+        description="Phase A - game selection with the Elite Elo filter")
+    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--n-games", type=int, default=150_000)
+    parser.add_argument("--min-elo", type=int, default=0)
+    parser.add_argument("--strict-elo", action="store_true",
+                        help="reject any game with a missing/unparseable Elo "
+                             "(Elite corpus only)")
+    args = parser.parse_args()
+    games, stats = select_games(args.dataset, args.n_games,
+                                strict_elo=args.strict_elo,
+                                min_elo=args.min_elo)
+    n = write_games(args.out, games)
+    print(f"\u2705 {n} games -> {args.out} (read {stats.read}, rejected_elo "
+          f"{stats.rejected_elo}, malformed {stats.rejected_malformed})")
+
+
+if __name__ == "__main__":
+    main()
