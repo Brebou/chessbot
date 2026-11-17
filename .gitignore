@@ -1,8 +1,8 @@
 # Generated diagnostic artifacts
 results/
 
-# Downloaded datasets
-data/
+# Downloaded datasets (repo-root only; ft/data/ is source code)
+/data/
 
 # Python
 __pycache__/
