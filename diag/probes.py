@@ -247,9 +247,11 @@ class ProbeRunner:
         active = list(range(len(matches)))
         prog = ProgressLine(min_interval=2.0)
         while active:
+            plies = sum(matches[i]["board"].ply() - matches[i]["start_ply"]
+                        for i in active)
             prog.show(
                 f"Matches: {len(matches) - len(active)}/{len(matches)} finished "
-                f"| {prog.elapsed:.0f}s elapsed"
+                f"| {plies:,} plies played | {prog.elapsed:.0f}s elapsed"
             )
             model_idx, engine_idx = [], []
             for i in active:
@@ -1031,6 +1033,7 @@ class ProbeRunner:
 
         local_pool = None
         if pool is None and self.workers > 1:
+            print(f"Starting P7 engine pool with {self.workers} workers...")
             local_pool = self._make_engine_pool()
             pool = local_pool
 
@@ -1111,25 +1114,34 @@ class ProbeRunner:
                 local_pool.terminate()
                 local_pool.join()
 
-        def accuracy(samples: List[dict]) -> Dict[str, Any]:
+        def accuracy(samples: List[dict], label: str) -> Dict[str, Any]:
             samples = [s for s in samples if s["next_move"] in self.tokenizer.token_to_id]
             if not samples:
                 return {"n": 0, "top1_acc": 0.0, "top3_acc": 0.0}
             histories = [s["history"] for s in samples]
             ids = [self.tokenizer.token_to_id[s["next_move"]] for s in samples]
-            logits_all = self.fast_player.last_logits(histories)
+            bs = self.fast_player.batch_size
             top1 = top3 = 0
-            for logits, tid in zip(logits_all, ids):
-                top = np.argsort(logits)[::-1][:3]
-                if int(top[0]) == tid:
-                    top1 += 1
-                if tid in top:
-                    top3 += 1
+            prog = ProgressLine()
+            for c in range(0, len(samples), bs):
+                logits_all = self.fast_player.last_logits(histories[c:c + bs])
+                for logits, tid in zip(logits_all, ids[c:c + bs]):
+                    top = np.argsort(logits)[::-1][:3]
+                    if int(top[0]) == tid:
+                        top1 += 1
+                    if tid in top:
+                        top3 += 1
+                done = min(c + bs, len(samples))
+                prog.show(
+                    f"{label}: {done:,}/{len(samples):,} positions | "
+                    f"{prog.rate(done):.1f}/s | {prog.eta(done, len(samples))}"
+                )
+            prog.close()
             n = len(samples)
             return {"n": n, "top1_acc": top1 / n, "top3_acc": top3 / n}
 
-        seen_metrics = accuracy(seen_samples)
-        unseen_metrics = accuracy(unseen_samples)
+        seen_metrics = accuracy(seen_samples, "P7 seen")
+        unseen_metrics = accuracy(unseen_samples, "P7 unseen")
 
         tranche_buckets = {"<1200": [], "1200-1599": [], "1600-1999": [], "2000+": []}
         for s in unseen_samples:
@@ -1144,7 +1156,8 @@ class ProbeRunner:
                 tranche_buckets["1600-1999"].append(s)
             else:
                 tranche_buckets["2000+"].append(s)
-        elo_tranches = {k: accuracy(v) for k, v in tranche_buckets.items() if v}
+        elo_tranches = {k: accuracy(v, f"P7 elo {k}")
+                        for k, v in tranche_buckets.items() if v}
 
         metrics = {
             "split_index": split_index,
@@ -1193,6 +1206,9 @@ class ProbeRunner:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         results = {}
+        if self.workers > 1:
+            print(f"Starting engine pool with {self.workers} workers "
+                  f"(spawn: each worker loads torch, may take a minute)...")
         pool = self._make_engine_pool()
         try:
             onpolicy_path = corpus_dir / "onpolicy_positions.jsonl"
