@@ -269,6 +269,7 @@ def generate_endgame_examples(n_games: int, level: int, seed: int,
     for i in range(n_games):
         etype = "kqk" if i % 2 == 0 else "krk"
         board = generate_endgame_position(random.Random(f"endpos-{seed}-{i}"), etype)
+        start_fen = board.fen()
         white = FastEngine(level=level, seed=f"endw-{seed}-{i}")
         black = FastEngine(level=level, seed=f"endb-{seed}-{i}")
         history: List[str] = []
@@ -290,11 +291,12 @@ def generate_endgame_examples(n_games: int, level: int, seed: int,
         if winner != "white":
             continue
         # strong side = white (the generator gives White the Q/R)
-        replayed = chess.Board()
+        replayed = chess.Board(start_fen)
         for j, uci in enumerate(history):
             if replayed.turn == chess.WHITE:
                 out.append({"kind": "endgame", "history": history[:j],
-                            "target": uci, "weight": 1.0})
+                            "target": uci, "weight": 1.0,
+                            "start_fen": start_fen})
             replayed.push_uci(uci)
     return out
 
@@ -303,11 +305,23 @@ def generate_endgame_examples(n_games: int, level: int, seed: int,
 # Mix builder
 # ---------------------------------------------------------------------------
 
+def _elo(row: dict, key: str) -> Optional[int]:
+    """Robust Elo field read: ints, floats, numeric strings; None otherwise."""
+    value = row.get(key)
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def load_games(dataset: str, n_games: int, min_elo: int = 0) -> List[str]:
     """First ``n_games`` games (moves strings) from a converted JSONL corpus.
 
     With ``min_elo > 0``, only games where BOTH players are rated >= min_elo
-    are kept (scanning until n_games such games are collected or EOF).
+    are kept (scanning until n_games such games are collected or EOF). Games
+    with missing/unparseable Elo fields are skipped when filtering.
     """
     opener = gzip.open if str(dataset).endswith(".gz") else open
     games: List[str] = []
@@ -318,11 +332,9 @@ def load_games(dataset: str, n_games: int, min_elo: int = 0) -> List[str]:
                 continue
             row = json.loads(line)
             if min_elo > 0:
-                try:
-                    if int(row.get("WhiteElo")) < min_elo or \
-                            int(row.get("BlackElo")) < min_elo:
-                        continue
-                except (TypeError, ValueError):
+                white, black = _elo(row, "WhiteElo"), _elo(row, "BlackElo")
+                if white is None or black is None or \
+                        white < min_elo or black < min_elo:
                     continue
             games.append(row["moves"])
             if len(games) >= n_games:
@@ -368,7 +380,7 @@ def build_mix(dataset: str, out: str, *, n_games: int = 300_000,
               max_replay: int = 300_000, max_capture: int = 150_000,
               max_mate1: int = 100_000, max_hang: int = 150_000,
               max_endgame: int = 100_000, max_promotion: int = 20_000,
-              endgame_demos: int = 4000, endgame_level: int = 2,
+              endgame_demos: int = 4000, endgame_level: int = 3,
               hang_tries: int = 8, force: bool = False,
               progress: bool = True) -> Dict[str, int]:
     """Build the SFT mix; returns per-kind example counts.
@@ -408,13 +420,20 @@ def build_mix(dataset: str, out: str, *, n_games: int = 300_000,
                      "hang": max_hang, "endgame": max_endgame,
                      "promotion": max_promotion}
     hq = Path(hq_dataset)
+    hq_list: List[str] = []
     if hq.exists():
         hq_list = load_games(str(hq), hq_games, min_elo=min_elo)
         print(f"Loaded {len(hq_list)} games >= {min_elo} Elo from {hq} "
               f"(tactical source)")
+        if not hq_list and min_elo > 0:
+            print(f"⚠️ 0 games passed the >= {min_elo} Elo filter (missing or "
+                  f"unparseable Elo fields?): retrying unfiltered")
+            hq_list = load_games(str(hq), hq_games, min_elo=0)
+            print(f"Loaded {len(hq_list)} unfiltered games from {hq}")
     else:
-        print(f"⚠️ HQ dataset {hq} not found: mining tactical examples from "
-              f"the training corpus instead")
+        print(f"⚠️ HQ dataset {hq} not found")
+    if not hq_list:
+        print(f"⚠️ falling back to the training corpus for tactical examples")
         hq_list = games
     c, ex = _mine_pool(hq_list, cfg, tactical_caps, workers,
                        "tactical mining", progress)
@@ -454,7 +473,7 @@ def main() -> None:
     parser.add_argument("--max-endgame", type=int, default=100_000)
     parser.add_argument("--max-promotion", type=int, default=20_000)
     parser.add_argument("--endgame-demos", type=int, default=4000)
-    parser.add_argument("--endgame-level", type=int, default=2)
+    parser.add_argument("--endgame-level", type=int, default=3)
     parser.add_argument("--hang-tries", type=int, default=8)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
