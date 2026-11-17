@@ -45,20 +45,33 @@ class FastProbePlayer:
         self._bos = tokenizer.bos_token_id
         self._n_ctx = model.cfg.n_ctx
         self._wte = model.wte.weight
+        self._warned_truncation = False
 
     # -- core forward ------------------------------------------------------
+
+    def _fit_history(self, history: Sequence[str]) -> Sequence[str]:
+        """Truncate an over-long history to fit the context, preserving move
+        parity (same semantics as the model player during real games)."""
+        max_moves = self._n_ctx - 1
+        if len(history) <= max_moves:
+            return history
+        if not self._warned_truncation:
+            self._warned_truncation = True
+            print(f"\u26a0\ufe0f Histories longer than {max_moves} moves are truncated "
+                  f"(even number of moves dropped from the front, parity preserved)")
+        excess = len(history) - max_moves
+        return history[excess + (excess & 1):]
 
     @torch.inference_mode()
     def _forward_chunk(self, chunk: List[List[str]]) -> torch.Tensor:
         """Logits at the last move for a chunk of histories, shape (b, vocab)."""
         n = len(chunk)
-        lengths = np.fromiter((1 + len(h) for h in chunk), dtype=np.int64, count=n)
+        fitted = [list(self._fit_history(h)) for h in chunk]
+        lengths = np.fromiter((1 + len(h) for h in fitted), dtype=np.int64, count=n)
         max_len = int(lengths.max())
-        if max_len > self._n_ctx:
-            raise ValueError(f"history length {max_len} exceeds context {self._n_ctx}")
         arr = np.full((n, max_len), self._pad, dtype=np.int64)
         tok_ids = self._tok_ids
-        for i, h in enumerate(chunk):
+        for i, h in enumerate(fitted):
             arr[i, 0] = self._bos
             pos = 1
             for m in h:
@@ -69,6 +82,27 @@ class FastProbePlayer:
         last_pos = torch.from_numpy(lengths - 1).to(self.device)
         last_hidden = hidden[torch.arange(n, device=self.device), last_pos]
         return F.linear(last_hidden, self._wte)
+
+    def _forward_auto(self, chunk: List[List[str]]) -> torch.Tensor:
+        """_forward_chunk over the whole chunk, automatically splitting into
+        smaller sub-chunks on CUDA out-of-memory instead of crashing."""
+        start, size = 0, len(chunk)
+        results = []
+        while start < len(chunk):
+            try:
+                results.append(self._forward_chunk(chunk[start:start + size]))
+            except torch.OutOfMemoryError:
+                if size == 1:
+                    raise
+                size = max(1, size // 2)
+                print(f"\u26a0\ufe0f CUDA out of memory: retrying with batch size {size}")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+            start += size
+        if len(results) == 1:
+            return results[0]
+        return torch.cat(results, dim=0)
 
     @torch.inference_mode()
     def last_logits(self, histories: Sequence[Sequence[str]]) -> np.ndarray:
@@ -81,7 +115,7 @@ class FastProbePlayer:
         for start in range(0, n, self.batch_size):
             idxs = order[start:start + self.batch_size]
             chunk = [histories[i] for i in idxs]
-            logits = self._forward_chunk(chunk)
+            logits = self._forward_auto(chunk)
             out[idxs] = logits.float().cpu().numpy()
         return out
 
@@ -104,7 +138,7 @@ class FastProbePlayer:
         for start in range(0, n, self.batch_size):
             idxs = order[start:start + self.batch_size]
             chunk = [histories[i] for i in idxs]
-            logits = self._forward_chunk(chunk)
+            logits = self._forward_auto(chunk)
             k = min(self.topk, logits.shape[-1])
             top = torch.topk(logits, k, dim=-1).indices.cpu().numpy()
             for row, i in enumerate(idxs):
