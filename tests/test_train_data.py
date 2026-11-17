@@ -105,7 +105,9 @@ def test_generate_endgame_examples_runs():
     ex = generate_endgame_examples(4, level=2, seed=0, max_plies=40)
     for e in ex:
         assert e["kind"] == "endgame"
-        board = replay(e["history"])
+        board = chess.Board(e["start_fen"])
+        for uci in e["history"]:
+            board.push_uci(uci)
         assert board.parse_uci(e["target"]) is not None
 
 
@@ -135,7 +137,12 @@ def test_build_mix_end_to_end(tmp_path):
     for r in rows:
         assert r["kind"] in ("replay", "capture", "mate1", "hang", "endgame",
                              "promotion")
-        board = replay(r["history"])
+        if "start_fen" in r:
+            board = chess.Board(r["start_fen"])
+            for uci in r["history"]:
+                board.push_uci(uci)
+        else:
+            board = replay(r["history"])
         assert board.parse_uci(r["target"]) is not None
         if "bad" in r:
             assert r["bad"] != r["target"]
