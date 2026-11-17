@@ -192,9 +192,35 @@ class RLTrainer:
                 workers=cfg.eval_workers, progress=False)
             per_seed[str(seed)] = summary["mean_score"]
             scores.append(summary["mean_score"])
+        row = {"eval_mean_score": sum(scores) / len(scores),
+               "eval_per_seed": per_seed}
+        if cfg.eval_vs_ref:
+            row.update(self._evaluate_vs_ref(eval_dir))
         shutil.rmtree(eval_dir, ignore_errors=True)
-        return {"eval_mean_score": sum(scores) / len(scores),
-                "eval_per_seed": per_seed}
+        return row
+
+    def _evaluate_vs_ref(self, eval_dir: Path) -> dict:
+        """Elo proxy: score of the current policy against the frozen reference
+        model, round-robin style (same openings protocol as the engine eval).
+        Guards against engine over-fitting: if the engine score rises while
+        this score falls, the mix is distorting play style."""
+        import chess
+        from chess_hw.match import _pair_task, run_tasks, score_for, select_openings
+        cfg = self.cfg
+        per_seed = {}
+        for seed in cfg.eval_seeds:
+            oids = select_openings(seed, cfg.eval_n_openings)
+            tasks = [("cur", "ref", oid, a_white)
+                     for oid in oids for a_white in (True, False)]
+            recs = run_tasks(_pair_task, tasks,
+                             {"cur": str(eval_dir), "ref": str(cfg.model_path)},
+                             cfg.eval_workers, progress=False)
+            pts = [score_for(r["result"],
+                             chess.WHITE if r["meta"]["a_white"] else chess.BLACK)
+                   for r in recs]
+            per_seed[str(seed)] = sum(pts) / max(len(pts), 1)
+        return {"eval_vs_ref_score": sum(per_seed.values()) / max(len(per_seed), 1),
+                "eval_vs_ref_per_seed": per_seed}
 
     # -- main loop ---------------------------------------------------------
 
@@ -209,7 +235,7 @@ class RLTrainer:
                 levels=cfg.levels, group_size=cfg.group_size, seed=seed,
                 temperature=cfg.temperature, batch_size=cfg.train_batch_size,
                 max_plies=cfg.max_plies, engine_workers=cfg.engine_workers,
-                device=self.device)
+                selfplay_ratio=cfg.selfplay_ratio, device=self.device)
             advantages = compute_advantages(
                 games, gamma=cfg.gamma, illegal_penalty=cfg.illegal_penalty,
                 result_reward=cfg.result_reward,
@@ -227,7 +253,16 @@ class RLTrainer:
             if cfg.eval_every > 0 and iteration % cfg.eval_every == 0:
                 eval_row = self._evaluate(iteration)
                 row.update(eval_row)
-                score = eval_row["eval_mean_score"]
+                if cfg.best_criterion == "engine":
+                    score = row["eval_mean_score"]
+                elif cfg.best_criterion == "vs_ref":
+                    score = row.get("eval_vs_ref_score", row["eval_mean_score"])
+                else:  # balanced: mean of engine score and vs-ref score
+                    parts = [row["eval_mean_score"]]
+                    if "eval_vs_ref_score" in row:
+                        parts.append(row["eval_vs_ref_score"])
+                    score = sum(parts) / len(parts)
+                row["best_criterion_score"] = score
                 if self.best_score is None or score > self.best_score:
                     self.best_score = score
                     self._save(self.run_dir / "best")
@@ -238,6 +273,7 @@ class RLTrainer:
                   f"illegal={row['illegal_rate']:.3f} "
                   f"pg={row['pg_loss']:.4f} "
                   f"eval={row.get('eval_mean_score', float('nan')):.3f} "
+                  f"vs_ref={row.get('eval_vs_ref_score', float('nan')):.3f} "
                   f"({row['iter_seconds']:.0f}s)", flush=True)
 
         final = self._save(self.run_dir / "final")

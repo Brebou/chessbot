@@ -57,9 +57,10 @@ def test_trainer_tiny_run(tiny_model, tmp_path):
         model_path=str(tiny_model), out_dir=str(tmp_path / "run"),
         device="cpu", seed=3, max_iters=2, levels=(0,), games_per_iter=4,
         group_size=2, max_plies=10, temperature=1.0, engine_workers=0,
-        lr=1e-4, ppo_clip=0.2, inner_epochs=1, minibatches=2,
+        selfplay_ratio=0.5, lr=1e-4, ppo_clip=0.2, inner_epochs=1, minibatches=2,
         kl_coef=0.05, replay_coef=0.0, eval_every=2, eval_levels=(0,),
         eval_seeds=(0,), eval_n_openings=2, eval_workers=2, save_every=1,
+        eval_vs_ref=True, best_criterion="balanced",
     )
     trainer = RLTrainer(cfg)
     assert (tmp_path / "run" / "config.json").exists()
@@ -77,11 +78,15 @@ def test_trainer_tiny_run(tiny_model, tmp_path):
     assert len(metrics) == 2
     for row in metrics:
         assert row["games"] == 4
+        assert row["engine_games"] + row["selfplay_games"] == 4
         assert 0.0 <= row["illegal_rate"] <= 1.0
         assert row["transitions"] > 0
         for key in ("pg_loss", "kl_loss", "entropy"):
             assert row[key] == row[key]  # finite (not NaN)
     assert "eval_mean_score" in metrics[-1]
+    assert "eval_vs_ref_score" in metrics[-1]
+    assert "best_criterion_score" in metrics[-1]
+    assert 0.0 <= metrics[-1]["eval_vs_ref_score"] <= 1.0
 
 
 def test_config_cli_roundtrip():

@@ -24,6 +24,11 @@ class RLConfig:
     temperature: float = 1.0
     illegal_penalty: float = -0.25             # reward of a sampled illegal move
     engine_workers: int = 0                    # 0 = in-process engine, >0 = process pool
+    # Fraction of rollout games that are model-vs-itself instead of model-vs-engine.
+    # Over-optimizing against the alpha-beta engine distorts play style and is
+    # known to LOWER round-robin Elo; self-play keeps the distribution
+    # tournament-like. Watch eval_vs_ref_score to tune this balance.
+    selfplay_ratio: float = 0.5
 
     # rewards / advantages
     result_reward: float = 1.0
@@ -55,10 +60,20 @@ class RLConfig:
     eval_n_openings: int = 25
     eval_workers: int = 8
     save_every: int = 5
+    # Elo proxy: score of the current policy vs the frozen reference model
+    # (round-robin style). If it drops while the engine score rises, the mix
+    # is over-fitting the alpha-beta engine -> raise selfplay_ratio.
+    eval_vs_ref: bool = True
+    # Which score keeps the best checkpoint: "engine" (eval_mean_score),
+    # "vs_ref" (round-robin proxy), or "balanced" (mean of both — default,
+    # since pure engine optimization is known to cost tournament Elo).
+    best_criterion: str = "balanced"
 
     def __post_init__(self) -> None:
         if self.baseline not in ("group", "global"):
             raise ValueError(f"unknown baseline: {self.baseline!r}")
+        if self.best_criterion not in ("engine", "vs_ref", "balanced"):
+            raise ValueError(f"unknown best_criterion: {self.best_criterion!r}")
         if self.games_per_iter % self.group_size != 0:
             raise ValueError("games_per_iter must be a multiple of group_size")
         if self.group_size < 1:

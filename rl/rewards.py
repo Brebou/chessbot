@@ -1,47 +1,63 @@
 """Rewards, discounted returns and group-normalized advantages.
 
-Reward design (per model decision, from the model's point of view):
+Reward design (per model decision, from the mover's point of view):
 
 - **illegal move**: the sampled token was not legal → fixed
   ``illegal_penalty`` (no material shaping; the game continued with the
   seeded random fallback, exactly like eval-time behavior);
-- **legal move**: dense material shaping ``material_shaping * (m_{i+1} - m_i)``
-  where ``m_i`` is the material diff (model POV) at decision ``i`` and
-  ``m_{i+1}`` is the material diff at the next model decision (i.e. after the
-  engine replied) — or the final material for the last decision. So a capture
-  the engine does not recoup credits positively, and a hung piece credits
-  negatively against the decision that hung it;
-- **terminal bonus**: the last decision additionally receives
-  ``result_reward * model_score``.
+- **legal move**: dense material shaping ``material_shaping × (m_{i+1} - m_i)``
+  where ``m_i`` is the material diff (mover POV) at decision ``i`` and
+  ``m_{i+1}`` is the material diff at the mover's *next* decision (i.e. after
+  the opponent replied) — or the final material for the mover's last
+  decision. A capture the opponent does not recoup credits positively; a
+  hung piece charges negatively against the decision that hung it;
+- **terminal bonus**: the last decision of each color receives
+  ``result_reward × score(color)`` — in self-play games both colors are the
+  same policy, so each side is credited with its own outcome.
 
 Returns are discounted with ``gamma`` from each decision to the end of the
 game. Advantages follow GRPO: returns are centered (and optionally scaled)
-within a group of games sharing the same (opening, model color, engine
-level), so the baseline compares identical starting conditions; with
-``baseline="global"`` a single mean over all transitions is subtracted
-instead (plain REINFORCE with a global baseline).
+within a group of games sharing identical starting conditions — (opening,
+model color, engine level) for engine games, (opening,) for self-play — or
+with ``baseline="global"`` a single mean over all transitions is subtracted
+(plain REINFORCE with a global baseline).
+
+Mix note: engine games optimize the engine score (grade 1) but over-optimizing
+against the alpha-beta opponent is known to distort play style and *lower*
+round-robin Elo; self-play games keep the policy distribution tournament-like.
+Keep both in the mix and watch the vs-reference eval (see ``rl/train.py``).
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Sequence
 
-from rl.rollout import RolloutGame
+from rl.rollout import RolloutGame, Transition, score_for_color
 
 
 def compute_rewards(game: RolloutGame, *, illegal_penalty: float,
                     result_reward: float, material_shaping: float) -> List[float]:
     """Per-transition rewards for one game (aligned with game.transitions)."""
-    mats = [t.material for t in game.transitions] + [game.final_material]
-    rewards: List[float] = []
+    mat_white = [t.material_white for t in game.transitions]
+    final_white = game.final_material_white
+
+    by_color: Dict[str, List[int]] = {}
     for i, t in enumerate(game.transitions):
-        if not t.legal:
-            rewards.append(illegal_penalty)
-            continue
-        r = material_shaping * (mats[i + 1] - mats[i])
-        if i == len(game.transitions) - 1:
-            r += result_reward * game.model_score
-        rewards.append(r)
+        by_color.setdefault(t.mover, []).append(i)
+
+    rewards = [0.0] * len(game.transitions)
+    for color, idxs in by_color.items():
+        sign = 1.0 if color == "white" else -1.0
+        for j, i in enumerate(idxs):
+            t = game.transitions[i]
+            if not t.legal:
+                rewards[i] = illegal_penalty
+                continue
+            next_mat = mat_white[idxs[j + 1]] if j + 1 < len(idxs) else final_white
+            r = material_shaping * sign * (next_mat - mat_white[i])
+            if j == len(idxs) - 1:
+                r += result_reward * score_for_color(game.result, color)
+            rewards[i] = r
     return rewards
 
 
@@ -112,23 +128,33 @@ def rollout_stats(games: Sequence[RolloutGame]) -> dict:
     n = len(games)
     if n == 0:
         return {"games": 0}
+    engine_games = [g for g in games if not g.selfplay]
+    selfplay_games = [g for g in games if g.selfplay]
     decisions = sum(len(g.transitions) for g in games)
     illegal = sum(1 for g in games for t in g.transitions if not t.legal)
-    return {
+    stats = {
         "games": n,
+        "engine_games": len(engine_games),
+        "selfplay_games": len(selfplay_games),
         "decisions": decisions,
         "illegal_rate": illegal / max(decisions, 1),
-        "mean_score": sum(g.model_score for g in games) / n,
-        "wins": sum(g.model_score == 1.0 for g in games),
-        "draws": sum(g.model_score == 0.5 for g in games),
-        "losses": sum(g.model_score == 0.0 for g in games),
         "mean_plies": sum(g.transitions[-1].ply + 1 for g in games if g.transitions) / n,
-        "by_level": {
-            str(lvl): {
-                "games": sum(1 for g in games if g.level == lvl),
-                "mean_score": (sum(g.model_score for g in games if g.level == lvl)
-                               / max(sum(1 for g in games if g.level == lvl), 1)),
-            }
-            for lvl in sorted({g.level for g in games})
-        },
     }
+    if engine_games:
+        stats["mean_score"] = (sum(g.model_score for g in engine_games)
+                               / len(engine_games))
+        stats["wins"] = sum(g.model_score == 1.0 for g in engine_games)
+        stats["draws"] = sum(g.model_score == 0.5 for g in engine_games)
+        stats["losses"] = sum(g.model_score == 0.0 for g in engine_games)
+        stats["by_level"] = {
+            str(lvl): {
+                "games": sum(1 for g in engine_games if g.level == lvl),
+                "mean_score": (sum(g.model_score for g in engine_games if g.level == lvl)
+                               / max(sum(1 for g in engine_games if g.level == lvl), 1)),
+            }
+            for lvl in sorted({g.level for g in engine_games})
+        }
+    if selfplay_games:
+        decisive = sum(1 for g in selfplay_games if g.result != "1/2-1/2")
+        stats["selfplay_decisive_rate"] = decisive / len(selfplay_games)
+    return stats
