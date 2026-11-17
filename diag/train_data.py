@@ -4,19 +4,23 @@ Produces ``data/sft_mix.jsonl``: one row per training example,
 
     {"kind": ..., "history": [uci, ...], "target": "uci", "bad": "uci"?, "weight": float}
 
-with kinds (see the plan d'attaque, Phase 1):
+with kinds (default profile 40% capture / 30% hang / 20% mates / 10% distill):
 
-- ``replay``    — next-move prediction on the model's own pre-training corpus
-                  (first ``--n-games`` games = the seen 940k), anti-forgetting;
 - ``capture``   — CE on the best SEE > 0 capture when the played move missed it
                   (weight grows with the SEE, capped at 3);
-- ``mate1``     — CE on a mating move (one per position, first found);
 - ``hang``      — margin pair: target = the (safe) played move, ``bad`` = an
                   alternative move that hangs >= 1 pawn (opponent's best
                   capture SEE >= 100 after it);
+- ``mate1``     — CE on a mating move (one per position, first found);
+- ``mate2``     — CE on a forced mate in 2 (a move after which EVERY opponent
+                  reply allows a mate in 1); mined on material-light positions
+                  (<= 16 pieces) where forced mates decide conversions;
+- ``distill``   — next-move prediction on HQ dump games (the coherence
+                  passenger; set ``--max-replay > 0`` for plain replay from
+                  the model's own pre-training corpus instead);
 - ``endgame``   — strong-side decisions from real KQK/KRK positions reached in
-                  corpus games, plus engine-vs-engine demonstrations from
-                  synthetic ``generate_endgame_position`` starts;
+                  corpus games, plus optional engine-vs-engine demonstrations
+                  from synthetic ``generate_endgame_position`` starts;
 - ``promotion`` — safe queen promotions (destination not capturable right after
                   the promotion, or the promotion gives check).
 
@@ -24,14 +28,13 @@ Positions come from replayed games, so every history is real and
 parity-correct. Curriculum: plies 9-30 and plies >= 121 get a configurable
 weight multiplier (the eval's real decision zone + the conversion zone).
 
-**Data quality split**: tactical examples (capture, mate1, hang, endgame,
-promotion) are mined from the *high-quality Elo-filtered* Lichess dumps
-(austindavis monthly files with ``WhiteElo``/``BlackElo``, e.g.
-``data/lichess_uci_201412.jsonl.gz``, default threshold 2200) so the "good"
-moves the model is taught come from strong play, not average blunder-prone
-games. The ``replay`` anti-forgetting examples stay on the model's own
-pre-training corpus (the seen 940k) to match its training distribution.
-If the HQ file is missing, everything falls back to the training corpus.
+**Data quality split**: tactical and distill examples are mined from the
+*high-quality Elo-filtered* Lichess dumps (austindavis monthly files with
+``WhiteElo``/``BlackElo``, e.g. ``data/lichess_uci_201412.jsonl.gz``, default
+threshold 2200) so the "good" moves the model is taught come from strong
+play, not average blunder-prone games. If no game passes the filter, the
+dump is retried unfiltered; if it is missing entirely, everything falls
+back to the training corpus.
 
 All computations are seeded, parallelized over a spawn pool of module-level
 workers, cached to the output file (skip if it exists, unless ``--force``),
@@ -100,6 +103,50 @@ def _opponent_best_capture_see(board: chess.Board) -> int:
     return best
 
 
+def _mate_in_1_uci(board: chess.Board) -> Optional[str]:
+    """First mating move for the side to move (checks only), or None."""
+    for m in board.legal_moves:
+        if not board.gives_check(m):
+            continue
+        board.push(m)
+        mate = board.is_checkmate()
+        board.pop()
+        if mate:
+            return m.uci()
+    return None
+
+
+def find_mate_in_2(board: chess.Board) -> Optional[str]:
+    """A move after which EVERY opponent reply allows a mate in 1, or None.
+
+    Candidates are ordered checks-first (forced mates almost always start
+    with check) and each candidate is refuted at the first surviving reply,
+    so the scan stays cheap on non-mating positions. Best used on
+    material-light positions (the caller gates on piece count)."""
+    if board.is_game_over():
+        return None
+    checks, quiet = [], []
+    for m in board.legal_moves:
+        (checks if board.gives_check(m) else quiet).append(m)
+    for m in checks + quiet:
+        board.push(m)
+        if board.is_game_over():
+            board.pop()
+            continue
+        refuted = False
+        for r in board.legal_moves:
+            board.push(r)
+            mate = _mate_in_1_uci(board) is not None
+            board.pop()
+            if not mate:
+                refuted = True
+                break
+        board.pop()
+        if not refuted:
+            return m.uci()
+    return None
+
+
 def extract_examples(board: chess.Board, played_uci: str, rng: random.Random,
                      hang_tries: int = 8) -> List[dict]:
     """Tactical examples for one (position, played move) pair."""
@@ -116,6 +163,13 @@ def extract_examples(board: chess.Board, played_uci: str, rng: random.Random,
         if mate:
             examples.append({"kind": "mate1", "target": m.uci(), "weight": 1.0})
             break
+
+    # mate in 2 (forced: every reply allows a mate in 1); piece-gated for cost
+    if len(board.piece_map()) <= 16 and not any(
+            e["kind"] == "mate1" for e in examples):
+        m2 = find_mate_in_2(board)
+        if m2 is not None:
+            examples.append({"kind": "mate2", "target": m2, "weight": 1.0})
 
     # best winning capture
     best_mv, best_see = None, 0
@@ -204,8 +258,8 @@ def mine_game(task: Tuple[int, str, dict]) -> List[dict]:
 
         if ply in decision:
             w = ply_weight(ply)
-            out.append({"kind": "replay", "history": list(history),
-                        "target": uci, "weight": w})
+            out.append({"kind": cfg.get("replay_kind", "replay"),
+                        "history": list(history), "target": uci, "weight": w})
             for ex in extract_examples(board, uci, rng,
                                        cfg.get("hang_tries", 8)):
                 ex.setdefault("history", list(history))
@@ -377,21 +431,26 @@ def build_mix(dataset: str, out: str, *, n_games: int = 300_000,
               workers: int = 8, seed: int = 0,
               hq_dataset: str = "data/lichess_uci_201412.jsonl.gz",
               hq_games: int = 300_000, min_elo: int = 2200,
-              max_replay: int = 300_000, max_capture: int = 150_000,
-              max_mate1: int = 100_000, max_hang: int = 150_000,
+              max_replay: int = 0, max_capture: int = 240_000,
+              max_mate1: int = 80_000, max_mate2: int = 40_000,
+              max_hang: int = 180_000,
               max_endgame: int = 100_000, max_promotion: int = 20_000,
-              endgame_demos: int = 4000, endgame_level: int = 3,
+              max_distill: int = 60_000,
+              endgame_demos: int = 0, endgame_level: int = 3,
               hang_tries: int = 8, force: bool = False,
               progress: bool = True) -> Dict[str, int]:
     """Build the SFT mix; returns per-kind example counts.
 
-    ``replay`` examples come from the model's own training corpus (first
-    ``n_games`` games); tactical examples (capture, mate1, hang, endgame,
-    promotion) come from the Elo-filtered HQ dump (``hq_dataset``, both
-    players >= ``min_elo``, first ``hq_games`` such games). Falls back to the
-    training corpus for everything if the HQ file is missing. Caps are
-    applied per kind in game order (deterministic); the output file is
-    skipped if it already exists unless ``force``.
+    Default profile (by example count): 40% winning captures, 30% anti-hang
+    pairs, 20% forced mates (mate1 + mate2), 10% distillation from the HQ
+    dump. Tactical and distill examples are mined in one pass over the
+    Elo-filtered HQ games (``hq_dataset``, both players >= ``min_elo``);
+    falls back to unfiltered HQ games, then to the training corpus, with a
+    warning. ``replay`` (next-move prediction on the model's own corpus) is
+    off by default; set ``max_replay > 0`` to re-enable it as an
+    anti-forgetting passenger. Caps are applied per kind in game order
+    (deterministic); the output file is skipped if it already exists unless
+    ``force``.
     """
     out_path = Path(out)
     if out_path.exists() and not force:
@@ -407,18 +466,20 @@ def build_mix(dataset: str, out: str, *, n_games: int = 300_000,
     examples: List[dict] = []
     started = time.monotonic()
 
-    # pass A: replay examples from the model's own (seen) corpus
+    # pass A: optional replay examples from the model's own (seen) corpus
     games = load_games(dataset, n_games)
-    print(f"Loaded {len(games)} games from {dataset} (replay source)")
-    c, ex = _mine_pool(games, cfg, {"replay": max_replay}, workers,
-                       "replay mining", progress)
-    counts.update(c)
-    examples.extend(ex)
+    if max_replay > 0:
+        print(f"Loaded {len(games)} games from {dataset} (replay source)")
+        c, ex = _mine_pool(games, cfg, {"replay": max_replay}, workers,
+                           "replay mining", progress)
+        counts.update(c)
+        examples.extend(ex)
 
-    # pass B: tactical examples from Elo-filtered high-quality games
+    # pass B: tactical + distill examples from Elo-filtered high-quality games
     tactical_caps = {"capture": max_capture, "mate1": max_mate1,
-                     "hang": max_hang, "endgame": max_endgame,
-                     "promotion": max_promotion}
+                     "mate2": max_mate2, "hang": max_hang,
+                     "endgame": max_endgame, "promotion": max_promotion,
+                     "distill": max_distill}
     hq = Path(hq_dataset)
     hq_list: List[str] = []
     if hq.exists():
@@ -435,6 +496,7 @@ def build_mix(dataset: str, out: str, *, n_games: int = 300_000,
     if not hq_list:
         print(f"⚠️ falling back to the training corpus for tactical examples")
         hq_list = games
+    cfg["replay_kind"] = "distill"
     c, ex = _mine_pool(hq_list, cfg, tactical_caps, workers,
                        "tactical mining", progress)
     counts.update(c)
@@ -466,13 +528,15 @@ def main() -> None:
     parser.add_argument("--n-games", type=int, default=300_000)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-replay", type=int, default=300_000)
-    parser.add_argument("--max-capture", type=int, default=150_000)
-    parser.add_argument("--max-mate1", type=int, default=100_000)
-    parser.add_argument("--max-hang", type=int, default=150_000)
+    parser.add_argument("--max-replay", type=int, default=0)
+    parser.add_argument("--max-capture", type=int, default=240_000)
+    parser.add_argument("--max-mate1", type=int, default=80_000)
+    parser.add_argument("--max-mate2", type=int, default=40_000)
+    parser.add_argument("--max-hang", type=int, default=180_000)
     parser.add_argument("--max-endgame", type=int, default=100_000)
     parser.add_argument("--max-promotion", type=int, default=20_000)
-    parser.add_argument("--endgame-demos", type=int, default=4000)
+    parser.add_argument("--max-distill", type=int, default=60_000)
+    parser.add_argument("--endgame-demos", type=int, default=0)
     parser.add_argument("--endgame-level", type=int, default=3)
     parser.add_argument("--hang-tries", type=int, default=8)
     parser.add_argument("--force", action="store_true")
@@ -481,8 +545,9 @@ def main() -> None:
               seed=args.seed, hq_dataset=args.hq_dataset, hq_games=args.hq_games,
               min_elo=args.min_elo, max_replay=args.max_replay,
               max_capture=args.max_capture, max_mate1=args.max_mate1,
-              max_hang=args.max_hang, max_endgame=args.max_endgame,
-              max_promotion=args.max_promotion, endgame_demos=args.endgame_demos,
+              max_mate2=args.max_mate2, max_hang=args.max_hang,
+              max_endgame=args.max_endgame, max_promotion=args.max_promotion,
+              max_distill=args.max_distill, endgame_demos=args.endgame_demos,
               endgame_level=args.endgame_level, hang_tries=args.hang_tries,
               force=args.force)
 

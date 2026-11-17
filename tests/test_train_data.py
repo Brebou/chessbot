@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import chess
 
 from diag.common import replay
-from diag.train_data import (build_mix, extract_examples, generate_endgame_examples,
-                             mine_game, ply_weight)
+from diag.train_data import (build_mix, extract_examples, find_mate_in_2,
+                             generate_endgame_examples, mine_game, ply_weight)
 
 
 def kinds(examples):
@@ -73,6 +73,41 @@ def test_extract_hang_pair():
         replay(board.move_stack and [m.uci() for m in board.move_stack])
 
 
+def test_find_mate_in_2_two_rook_ladder():
+    # quiet key move (no mate in 1 available): 1.Ra7! forces mate next move
+    board = chess.Board("7k/8/8/8/8/8/R7/1R5K w - - 0 1")
+    m2 = find_mate_in_2(board)
+    assert m2 is not None
+    board.push_uci(m2)
+    assert not board.is_game_over()
+    for r in list(board.legal_moves):
+        board.push(r)
+        found = False
+        for w2 in board.legal_moves:
+            board.push(w2)
+            if board.is_checkmate():
+                found = True
+            board.pop()
+        board.pop()
+        assert found, f"reply {r.uci()} refutes the claimed mate in 2"
+
+
+def test_find_mate_in_2_none_on_quiet_positions():
+    assert find_mate_in_2(chess.Board()) is None
+    board = chess.Board()
+    for uci in ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"]:
+        board.push_uci(uci)
+    assert find_mate_in_2(board) is None
+
+
+def test_extract_mate_in_2_endgame_position():
+    board = chess.Board("7k/8/8/8/8/8/R7/1R5K w - - 0 1")
+    rng = __import__("random").Random(0)
+    ex = extract_examples(board, "a2a7", rng, hang_tries=0)
+    m2 = [e for e in ex if e["kind"] == "mate2"]
+    assert m2 and m2[0]["target"] is not None
+
+
 def test_mine_game_replay_and_curriculum():
     moves = " ".join(["g1f3", "g8f6", "f3g1", "f6g8"] * 10)  # legal shuffles
     cfg = {"seed": 0, "hang_tries": 0, "endgame_per_game": 0,
@@ -126,17 +161,19 @@ def test_build_mix_end_to_end(tmp_path):
     counts = build_mix(str(ds), str(out), n_games=10, workers=2, seed=0,
                        hq_dataset=str(ds), hq_games=10, min_elo=0,
                        max_replay=1000, max_capture=1000, max_mate1=1000,
-                       max_hang=1000, max_endgame=1000, max_promotion=100,
+                       max_mate2=1000, max_hang=1000, max_endgame=1000,
+                       max_promotion=100, max_distill=1000,
                        endgame_demos=2, endgame_level=2, force=True,
                        progress=False)
     assert counts["replay"] > 0
+    assert counts["distill"] > 0
     assert counts["mate1"] >= 1
     assert counts["capture"] >= 1
     rows = [json.loads(l) for l in open(out) if l.strip()]
     assert len(rows) == sum(counts.values())
     for r in rows:
-        assert r["kind"] in ("replay", "capture", "mate1", "hang", "endgame",
-                             "promotion")
+        assert r["kind"] in ("replay", "capture", "mate1", "mate2", "hang",
+                             "endgame", "promotion", "distill")
         if "start_fen" in r:
             board = chess.Board(r["start_fen"])
             for uci in r["history"]:

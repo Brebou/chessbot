@@ -1,8 +1,8 @@
 """Phase 1 combined SFT training for ChessGPT.
 
 Consumes the mix built by ``diag/train_data.py`` (kinds: replay, capture,
-mate1, hang, endgame, promotion) and trains the fixed ``ChessGPT``
-architecture with additive losses:
+mate1, mate2, hang, endgame, promotion, distill) and trains the fixed
+``ChessGPT`` architecture with additive losses:
 
 - **weighted CE** on the target move at the last history position, with
   per-kind weights (``--w-capture``, ``--w-mate1``, ...) times the example's
@@ -62,9 +62,11 @@ class SFTConfig:
     w_replay: float = 1.0
     w_capture: float = 2.0
     w_mate1: float = 3.0
-    w_hang: float = 1.0
+    w_mate2: float = 3.0
+    w_hang: float = 2.0
     w_endgame: float = 2.0
     w_promotion: float = 2.0
+    w_distill: float = 1.0
     # anti-hang margin loss
     margin_weight: float = 1.0
     margin_beta: float = 0.1
@@ -109,8 +111,9 @@ class SFTDataset:
     def __init__(self, rows: List[dict], tokenizer: ChessTokenizer, cfg: SFTConfig):
         self.cfg = cfg
         kind_w = {"replay": cfg.w_replay, "capture": cfg.w_capture,
-                  "mate1": cfg.w_mate1, "hang": cfg.w_hang,
-                  "endgame": cfg.w_endgame, "promotion": cfg.w_promotion}
+                  "mate1": cfg.w_mate1, "mate2": cfg.w_mate2,
+                  "hang": cfg.w_hang, "endgame": cfg.w_endgame,
+                  "promotion": cfg.w_promotion, "distill": cfg.w_distill}
         tok = tokenizer.token_to_id
         self.items: List[dict] = []
         for r in rows:
