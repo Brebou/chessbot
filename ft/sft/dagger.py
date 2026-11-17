@@ -18,9 +18,17 @@ bounds the dagger share (default 15%).
 
 from __future__ import annotations
 
+import argparse
 import random
+import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 
 import chess
 
@@ -211,3 +219,34 @@ def blend_dagger(rows: List[dict], dagger_rows: List[dict], *,
     max_dagger = int(max_share / (1 - max_share) * len(held)) \
         if max_share < 1 else len(order)
     return held + order[:max_dagger]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Stage 2 - Slice DAgger collection")
+    parser.add_argument("--model-path", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--n-episodes", type=int, default=400)
+    parser.add_argument("--stop-pieces", type=int, default=16)
+    parser.add_argument("--opening-plies", type=int, default=8)
+    parser.add_argument("--max-plies", type=int, default=120)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--engine", default="stockfish")
+    parser.add_argument("--depth", type=int, default=14)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--elite-positions", default="")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+    dagger_collect(args.model_path, args.out, n_episodes=args.n_episodes,
+                   stop_pieces=args.stop_pieces, opening_plies=args.opening_plies,
+                   max_plies=args.max_plies, device=args.device,
+                   batch_size=args.batch_size, engine_path=args.engine,
+                   depth=args.depth, workers=args.workers,
+                   elite_positions_path=args.elite_positions, seed=args.seed,
+                   force=args.force)
+
+
+if __name__ == "__main__":
+    main()
