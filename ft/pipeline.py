@@ -177,13 +177,17 @@ def run_pipeline(cfg: PipelineConfig, annotate_fn=None) -> dict:
 
     tb_adapter = build_tb_adapter(cfg.tb_dir)
     extras = tuple(p for p in cfg.extra_rows.split(",") if p.strip())
+    from diag.common import ProgressLine
+    print(f"⏳ Phase E: building buckets from {jsonl_count(paths['positions'])} "
+          f"positions (single-threaded, minutes; live progress below)...")
     counts = build_bucket_dataset(read_games(paths["games"]),
                                   paths["positions"], paths["annotations"],
                                   paths["mix"], tb_rows_path=tb_rows_path or "",
                                   extra_rows_paths=extras,
                                   tb_adapter=tb_adapter,
                                   target_total=cfg.target_total or None,
-                                  seed=cfg.seed, force=cfg.force)
+                                  seed=cfg.seed, force=cfg.force,
+                                  progress=ProgressLine())
     if tb_adapter is not None:
         tb_adapter.close()
     print(f"✅ Phase E: {sum(counts.values())} rows -> {paths['mix']} {counts}")
