@@ -22,7 +22,7 @@ import random
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import sys
 from pathlib import Path
@@ -73,8 +73,9 @@ def classify_position(ann: dict) -> Optional[str]:
 
 
 def build_rows(games: List[str], positions_path: str, annotations_path: str,
-               *, tb_rows_path: str = "", tb_adapter=None, seed: int = 0
-               ) -> "tuple[List[dict], Counter]":
+               *, tb_rows_path: str = "",
+               extra_rows_paths: Tuple[str, ...] = (), tb_adapter=None,
+               seed: int = 0) -> "tuple[List[dict], Counter]":
     """Attach real histories to annotated positions, classify, dedup."""
     positions = list(jsonl_read(positions_path))
     anns = {r["fen"]: r for r in jsonl_read(annotations_path)}
@@ -110,14 +111,15 @@ def build_rows(games: List[str], positions_path: str, annotations_path: str,
                         if bucket == "contrastive":
                             row["target"] = ann["best_uci"]
                             row["bad"] = ann["uci_played"]
+                        elif bucket == "mate":
+                            row["target"] = ann["best_uci"]
+                            row["mate_n"] = ann["mate_root"]
+                            if ann["mate_root"] == 2 and not find_mate_in_2(
+                                    chess.Board(ann["fen"])):
+                                drop_stats["mate2_unverified"] += 1
+                                continue
                         else:
                             row["target"] = ann["uci_played"]
-                            if bucket == "mate":
-                                row["mate_n"] = ann["mate_root"]
-                                if ann["mate_root"] == 2 and not find_mate_in_2(
-                                        chess.Board(ann["fen"])):
-                                    drop_stats["mate2_unverified"] += 1
-                                    continue
                         if tb_adapter is not None and r["n_pieces"] <= 5:
                             tb_row = _tb_relabel(board, tb_adapter)
                             if tb_row is not None:
@@ -140,6 +142,13 @@ def build_rows(games: List[str], positions_path: str, annotations_path: str,
     if tb_rows_path:
         for r in jsonl_read(tb_rows_path):
             rows.append(r)
+    for path in extra_rows_paths:
+        for r in jsonl_read(path):
+            if (r.get("bucket") in BUCKET_WEIGHTS and r.get("target")
+                    and isinstance(r.get("history"), list)):
+                rows.append(r)
+            else:
+                drop_stats["bad_extra_row"] += 1
     for row in rows:
         row["weight"] = BUCKET_WEIGHTS[row["bucket"]]
     return rows, drop_stats
@@ -213,7 +222,9 @@ def _apply_caps(rows: List[dict], seed: int) -> List[dict]:
 
 def build_bucket_dataset(games: List[str], positions_path: str,
                          annotations_path: str, out: str, *,
-                         tb_rows_path: str = "", tb_adapter=None,
+                         tb_rows_path: str = "",
+                         extra_rows_paths: Tuple[str, ...] = (),
+                         tb_adapter=None,
                          target_total: Optional[int] = None, seed: int = 0,
                          force: bool = False, progress=None) -> Dict[str, int]:
     out_path = Path(out)
@@ -222,8 +233,9 @@ def build_bucket_dataset(games: List[str], positions_path: str,
         print(f"✅ {out_path} exists ({sum(counts.values())} rows), skipping")
         return counts
     rows, drop_stats = build_rows(games, positions_path, annotations_path,
-                                  tb_rows_path=tb_rows_path, tb_adapter=tb_adapter,
-                                  seed=seed)
+                                  tb_rows_path=tb_rows_path,
+                                  extra_rows_paths=extra_rows_paths,
+                                  tb_adapter=tb_adapter, seed=seed)
     if drop_stats:
         print(f"⚠️ dropped: {dict(drop_stats)}")
     rows = _apply_caps(rows, seed)
@@ -244,16 +256,30 @@ def main() -> None:
     parser.add_argument("--annotations", required=True, help="Phase C output jsonl")
     parser.add_argument("--out", required=True)
     parser.add_argument("--tb-rows", default="", help="Phase D output jsonl")
+    parser.add_argument("--extra-rows", action="append", default=[],
+                        help="extra pre-bucketed rows (e.g. the pad_mates "
+                             "output); repeatable")
+    parser.add_argument("--tb-dir", default="",
+                        help="Syzygy dir; relabels elite rows with <= 5 pieces "
+                             "by the tablebase (they keep their real history)")
     parser.add_argument("--target-total", type=int, default=0,
                         help="0 = keep all classified rows")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     games = read_games(args.games)
+    tb_adapter = None
+    if args.tb_dir:
+        from ft.data.tablebase import SyzygyAdapter
+        tb_adapter = SyzygyAdapter(args.tb_dir)
     counts = build_bucket_dataset(games, args.positions, args.annotations,
                                   args.out, tb_rows_path=args.tb_rows,
+                                  extra_rows_paths=tuple(args.extra_rows),
+                                  tb_adapter=tb_adapter,
                                   target_total=args.target_total or None,
                                   seed=args.seed, force=args.force)
+    if tb_adapter is not None:
+        tb_adapter.close()
     print(f"✅ mix: {sum(counts.values())} rows {counts}")
 
 

@@ -173,6 +173,8 @@ def sample_tb_starts(adapter, shape: str, n_lines: int, *, dtz_lo: int = 1,
         if start is None:
             continue
         fen, dtz = start
+        if not (dtz_lo <= dtz <= dtz_hi):
+            continue
         item = {"fen": fen}
         if has_pawn and promo_lines < promo_target:
             promo_move = _line_has_promotion(fen, adapter)

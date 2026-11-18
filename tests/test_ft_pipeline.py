@@ -202,3 +202,124 @@ def test_pipeline_aborts_on_empty_games_file(tmp_path):
 def test_download_module_importable():
     import ft.data.download as d
     assert d.ELITE_DEFAULT_SHARDS == 6
+
+
+class _StubTB:
+    """wdl is given from White's POV and re-signed per side-to-move, mirroring
+    the Syzygy contract (positive = side to move wins)."""
+
+    def __init__(self, wdl: int, dtz: int):
+        self.wdl, self.dtz = wdl, dtz
+
+    def wdl_dtz(self, board):
+        try:
+            board.legal_moves
+        except Exception:
+            return None
+        sign = 1 if board.turn == chess.WHITE else -1
+        return (sign * self.wdl, sign * self.dtz)
+
+
+def test_sample_tb_starts_skips_out_of_range_dtz(tmp_path):
+    from ft.data.tablebase import sample_tb_starts
+
+    starts = sample_tb_starts(_StubTB(2, 45), "KRK", 5, seed=0,
+                              max_attempts=200)
+    assert starts == []
+
+
+def test_tb_relabel_returns_tb_target_for_winning_position():
+    from ft.data.build_buckets import _tb_relabel
+
+    board = chess.Board()
+    board.set_piece_at(chess.E1, chess.Piece(chess.KING, chess.WHITE))
+    board.set_piece_at(chess.E8, chess.Piece(chess.KING, chess.BLACK))
+    board.set_piece_at(chess.A1, chess.Piece(chess.ROOK, chess.WHITE))
+    target = _tb_relabel(board, _StubTB(2, 12))
+    assert target is not None and chess.Move.from_uci(target)
+
+    board2 = chess.Board()
+    board2.set_piece_at(chess.E1, chess.Piece(chess.KING, chess.WHITE))
+    board2.set_piece_at(chess.E8, chess.Piece(chess.KING, chess.BLACK))
+    assert _tb_relabel(board2, _StubTB(0, 5)) is None
+
+_FOOLS_MATE = "f2f3 e7e5 g2g4 d8h4"
+_SCHOLARS_MATE = "e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7"
+
+
+def test_pad_mates_mines_mate_in_1(tmp_path):
+    from ft.data.pad_mates import mine_mate_rows
+    src = tmp_path / "games.jsonl"
+    write_games(str(src), [_FOOLS_MATE, "e2e4 e7e5", "d2d4 d7d5"])
+    out = tmp_path / "mate_pad.jsonl"
+    stats = mine_mate_rows(str(src), str(out), workers=1, force=True)
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert stats["rows"] == len(rows) == 1
+    row = rows[0]
+    assert row["bucket"] == "mate" and row["target"] == "d8h4"
+    assert row["mate_n"] == 1 and row["game_id"] == "pad0"
+    assert row["history"] == ["f2f3", "e7e5", "g2g4"]
+    board = chess.Board()
+    for uci in row["history"]:
+        board.push_uci(uci)
+    board.parse_uci(row["target"])
+    board.push_uci(row["target"])
+    assert board.is_checkmate()
+
+
+def test_pad_mates_dedups_keys_across_games(tmp_path):
+    from ft.data.pad_mates import mine_mate_rows
+    src = tmp_path / "games.jsonl"
+    write_games(str(src), [_FOOLS_MATE, _FOOLS_MATE])
+    out = tmp_path / "mate_pad.jsonl"
+    mine_mate_rows(str(src), str(out), workers=1, force=True)
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert len(rows) == 1
+    again = mine_mate_rows(str(src), str(out), workers=1, force=False)
+    assert again["rows"] == -1
+    assert len(out.read_text().splitlines()) == 1
+
+
+def test_pad_mates_stops_at_max_rows(tmp_path):
+    from ft.data.pad_mates import mine_mate_rows
+    src = tmp_path / "games.jsonl"
+    write_games(str(src), [_FOOLS_MATE, _SCHOLARS_MATE])
+    out = tmp_path / "mate_pad.jsonl"
+    mine_mate_rows(str(src), str(out), max_rows=1, workers=1, force=True)
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert len(rows) == 1
+    assert rows[0]["target"] in ("d8h4", "h5f7")
+
+
+def _fools_mate_row() -> dict:
+    board = chess.Board()
+    history = []
+    for uci in _FOOLS_MATE.split():
+        if uci == "d8h4":
+            break
+        board.push_uci(uci)
+        history.append(uci)
+    return {"bucket": "mate", "game_id": "padx", "ply": 3,
+            "key": board.fen(), "history": history, "target": "d8h4",
+            "mate_n": 1}
+
+
+def test_extra_rows_add_mate_volume_to_mix(mini_pipeline, tmp_path):
+    from ft.data.build_buckets import build_bucket_dataset
+    _, paths = mini_pipeline
+    extra = tmp_path / "pad.jsonl"
+    rows = [_fools_mate_row(),
+            {"bucket": "nope", "history": [], "target": "e2e4"}]
+    with open(extra, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    counts = build_bucket_dataset(read_games(paths["games"]),
+                                  paths["positions"], paths["annotations"],
+                                  str(tmp_path / "mix_padded.jsonl"),
+                                  extra_rows_paths=(str(extra),), force=True)
+    assert counts["mate"] == 1
+    mate_rows = [json.loads(l) for l
+                 in (tmp_path / "mix_padded.jsonl").read_text().splitlines()
+                 if json.loads(l)["bucket"] == "mate"]
+    chess.Board(mate_rows[0]["key"]).parse_uci(mate_rows[0]["target"])
+    assert mate_rows[0]["weight"] == 1.0
