@@ -286,3 +286,39 @@ def test_build_fixtures_caches_deterministic_and_metrics_run(tiny_model, tmp_pat
     assert 0.0 <= metrics["mate1_top1_rate"] <= 1.0
     assert 0.0 <= metrics["top1_legal_end"] <= 1.0
     assert "top1_legal_global" in metrics
+
+def test_fast_engine_move_identical_levels_1_to_3():
+    from chess_hw.engine import Engine
+    from diag.fast_engine import FastEngine
+
+    def playout(rng, plies):
+        board = chess.Board()
+        moves = []
+        for _ in range(plies):
+            legal = list(board.legal_moves)
+            if not legal or board.outcome(claim_draw=True) is not None:
+                break
+            mv = legal[rng.randrange(len(legal))]
+            moves.append(mv.uci())
+            board.push(mv)
+        return moves
+
+    rng = random.Random(7)
+    boards = []
+    for plies in (16, 60):
+        moves = playout(rng, plies)
+        board = chess.Board()
+        for i, uci in enumerate(moves):
+            if i % 4 == 0 and len(boards) < 14:
+                boards.append(board.copy())
+            board.push_uci(uci)
+    seed = "engine-0-0-3-white"
+    for level in (1, 2):
+        for board in boards:
+            a = Engine(level=level, seed=seed).best_move(board)
+            b = FastEngine(level=level, seed=seed).best_move(board)
+            assert (a.uci() if a else None) == (b.uci() if b else None)
+    for board in boards[-2:]:
+        a = Engine(level=3, seed=seed).best_move(board)
+        b = FastEngine(level=3, seed=seed).best_move(board)
+        assert (a.uci() if a else None) == (b.uci() if b else None)
