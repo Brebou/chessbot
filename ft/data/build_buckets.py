@@ -244,16 +244,26 @@ def main() -> None:
     parser.add_argument("--annotations", required=True, help="Phase C output jsonl")
     parser.add_argument("--out", required=True)
     parser.add_argument("--tb-rows", default="", help="Phase D output jsonl")
+    parser.add_argument("--tb-dir", default="",
+                        help="Syzygy dir; relabels elite rows with <= 5 pieces "
+                             "by the tablebase (they keep their real history)")
     parser.add_argument("--target-total", type=int, default=0,
                         help="0 = keep all classified rows")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     games = read_games(args.games)
+    tb_adapter = None
+    if args.tb_dir:
+        from ft.data.tablebase import SyzygyAdapter
+        tb_adapter = SyzygyAdapter(args.tb_dir)
     counts = build_bucket_dataset(games, args.positions, args.annotations,
                                   args.out, tb_rows_path=args.tb_rows,
+                                  tb_adapter=tb_adapter,
                                   target_total=args.target_total or None,
                                   seed=args.seed, force=args.force)
+    if tb_adapter is not None:
+        tb_adapter.close()
     print(f"✅ mix: {sum(counts.values())} rows {counts}")
 
 

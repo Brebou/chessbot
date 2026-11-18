@@ -86,6 +86,17 @@ def _phase_a_games(cfg: PipelineConfig):
     return games, stats, elite
 
 
+def build_tb_adapter(tb_dir: str):
+    from ft.data.tablebase import SyzygyAdapter
+    if not tb_dir:
+        return None
+    try:
+        return SyzygyAdapter(tb_dir)
+    except (OSError, ValueError):
+        print(f"\u26a0\ufe0f tablebase dir {tb_dir} unusable - running without it")
+        return None
+
+
 def run_pipeline(cfg: PipelineConfig, annotate_fn=None) -> dict:
     from ft.data.annotate import annotate_positions
     from ft.data.build_buckets import build_bucket_dataset
@@ -163,11 +174,15 @@ def run_pipeline(cfg: PipelineConfig, annotate_fn=None) -> dict:
                               per_type=cfg.tb_per_type, seed=cfg.seed)
             print(f"✅ Phase D: {n} tb rows -> {tb_rows}")
 
+    tb_adapter = build_tb_adapter(cfg.tb_dir)
     counts = build_bucket_dataset(read_games(paths["games"]),
                                   paths["positions"], paths["annotations"],
                                   paths["mix"], tb_rows_path=tb_rows_path or "",
+                                  tb_adapter=tb_adapter,
                                   target_total=cfg.target_total or None,
                                   seed=cfg.seed, force=cfg.force)
+    if tb_adapter is not None:
+        tb_adapter.close()
     print(f"✅ Phase E: {sum(counts.values())} rows -> {paths['mix']} {counts}")
     return {**paths, "counts": counts}
 

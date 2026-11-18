@@ -202,3 +202,43 @@ def test_pipeline_aborts_on_empty_games_file(tmp_path):
 def test_download_module_importable():
     import ft.data.download as d
     assert d.ELITE_DEFAULT_SHARDS == 6
+
+
+class _StubTB:
+    """wdl is given from White's POV and re-signed per side-to-move, mirroring
+    the Syzygy contract (positive = side to move wins)."""
+
+    def __init__(self, wdl: int, dtz: int):
+        self.wdl, self.dtz = wdl, dtz
+
+    def wdl_dtz(self, board):
+        try:
+            board.legal_moves
+        except Exception:
+            return None
+        sign = 1 if board.turn == chess.WHITE else -1
+        return (sign * self.wdl, sign * self.dtz)
+
+
+def test_sample_tb_starts_skips_out_of_range_dtz(tmp_path):
+    from ft.data.tablebase import sample_tb_starts
+
+    starts = sample_tb_starts(_StubTB(2, 45), "KRK", 5, seed=0,
+                              max_attempts=200)
+    assert starts == []
+
+
+def test_tb_relabel_returns_tb_target_for_winning_position():
+    from ft.data.build_buckets import _tb_relabel
+
+    board = chess.Board()
+    board.set_piece_at(chess.E1, chess.Piece(chess.KING, chess.WHITE))
+    board.set_piece_at(chess.E8, chess.Piece(chess.KING, chess.BLACK))
+    board.set_piece_at(chess.A1, chess.Piece(chess.ROOK, chess.WHITE))
+    target = _tb_relabel(board, _StubTB(2, 12))
+    assert target is not None and chess.Move.from_uci(target)
+
+    board2 = chess.Board()
+    board2.set_piece_at(chess.E1, chess.Piece(chess.KING, chess.WHITE))
+    board2.set_piece_at(chess.E8, chess.Piece(chess.KING, chess.BLACK))
+    assert _tb_relabel(board2, _StubTB(0, 5)) is None
