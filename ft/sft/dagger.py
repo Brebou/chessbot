@@ -43,6 +43,9 @@ from ft.common.serialize import jsonl_read, jsonl_write
 
 MAX_SHARE = 0.15
 OOD_TOL = 1
+CP_BLUNDER_THRESHOLD = 150.0
+MATE_QUICK_PLIES = 2
+MATE_PIECE_GATE = 10
 
 
 def position_signature(fen: str) -> tuple:
@@ -268,11 +271,133 @@ def build_iteration2_mix(base_mix_path: str, dagger_path: str, out: str, *,
     return counts
 
 
+# -- proof-of-concept: full on-policy correction ------------------------------
+
+def _score_model_move_task(task):
+    """Module-level spawn worker: (fen, model_move, engine_path, depth).
+
+    Analyses the position, pushes the model move, and analyses the resulting
+    position; reports both in the original mover's POV."""
+    fen, model_move, engine_path, depth = task
+    from ft.data.annotate import StockfishAnnotator
+
+    key = (engine_path, depth)
+    if key not in _WORKER_ANNOTATOR:
+        _WORKER_ANNOTATOR[key] = StockfishAnnotator(engine_path, depth)
+    annotator = _WORKER_ANNOTATOR[key]
+    try:
+        before = annotator.annotate(fen)
+        board = chess.Board(fen)
+        board.push_uci(model_move)
+        after = annotator.annotate(board.fen())
+    finally:
+        annotator.close()
+    return {"fen": fen,
+            "cp_best": before["cp_best"],
+            "mate_best": before["mate_root"],
+            "cp_model": -after["cp_best"],
+            "mate_model": None if after["mate_root"] is None
+            else -after["mate_root"]}
+
+
+def classify_model_move(cp_best: Optional[int], cp_model: Optional[int],
+                        mate_best: Optional[int], mate_model: Optional[int],
+                        n_pieces: int, *, cp_threshold: float = CP_BLUNDER_THRESHOLD,
+                        mate_piece_gate: int = MATE_PIECE_GATE) -> str:
+    """'blunder' when the played move loses > cp_threshold, misses a forced
+    mate in <= MATE_QUICK_PLIES, or fails to convert any forced mate with
+    <= mate_piece_gate pieces on the board; else 'ok'."""
+    mover_mates = mate_best is not None and mate_best > 0
+    model_mates = mate_model is not None and mate_model > 0
+    loses_mate = mover_mates and (not model_mates or mate_model > mate_best)
+    if loses_mate and (mate_best <= MATE_QUICK_PLIES
+                       or n_pieces <= mate_piece_gate):
+        return "blunder"
+    if cp_best is not None and cp_model is not None \
+            and cp_best - cp_model > cp_threshold:
+        return "blunder"
+    return "ok"
+
+
+def _score_moves(tasks: List[tuple], *, engine_path: str = "stockfish",
+                 depth: int = 6, workers: int = 8,
+                 score_fn: Optional[Callable] = None,
+                 progress=None) -> Dict[str, dict]:
+    out: Dict[str, dict] = {}
+    if score_fn is not None:
+        for fen, model_move in tasks:
+            out[fen] = score_fn(fen, model_move)
+        if progress is not None:
+            progress.show(f"poc score: {len(out)}/{len(tasks)}", force=True)
+        return out
+    from multiprocessing import get_context
+
+    ctx = get_context("spawn")
+    pool_tasks = [(fen, model_move, engine_path, depth) for fen, model_move in tasks]
+    with ctx.Pool(workers) as pool:
+        for res in pool.imap(_score_model_move_task, pool_tasks, chunksize=8):
+            out[res["fen"]] = res
+            if progress is not None:
+                progress.show(f"poc score: {len(out)}/{len(tasks)}")
+    return out
+
+
+def build_poc_mix(dagger_path: str, out: str, *, engine_path: str = "stockfish",
+                  depth: int = 6, workers: int = 8,
+                  cp_threshold: float = CP_BLUNDER_THRESHOLD,
+                  mate_piece_gate: int = MATE_PIECE_GATE,
+                  score_fn: Optional[Callable] = None,
+                  force: bool = False, progress=None) -> dict:
+    """Full on-policy correction mix from a DAgger collection file.
+
+    States where the model's own move is classified a blunder become
+    `normal` CE rows toward the engine best; every other on-policy state is
+    dropped. Protection of non-blunder behavior comes from the trainer's
+    KL anchor (`--kl-lambda`), not from corpus rows. No off-policy data is
+    involved."""
+    show = progress.show if progress is not None else _noop
+    out_path = Path(out)
+    if out_path.exists() and not force:
+        return {"n_rows": sum(1 for _ in jsonl_read(out_path)), "cached": True}
+    all_rows = list(jsonl_read(dagger_path))
+    ce_rows = [r for r in all_rows if r.get("bucket") == "dagger"]
+    bad_by_key = {r["key"]: r["bad"] for r in all_rows
+                  if r.get("bucket") == "contrastive" and r.get("bad")}
+    scoring = [(r["key"], bad_by_key[r["key"]]) for r in ce_rows
+               if r["key"] in bad_by_key]
+    show(f"poc: scoring {len(scoring)} model moves with the engine "
+         f"(depth {depth})...")
+    scores = _score_moves(scoring, engine_path=engine_path, depth=depth,
+                          workers=workers, score_fn=score_fn, progress=progress)
+    out_rows: List[dict] = []
+    n_blunder = n_kept = 0
+    for r in ce_rows:
+        bad = bad_by_key.get(r["key"])
+        if bad is None:
+            continue
+        s = scores.get(r["key"], {})
+        verdict = classify_model_move(s.get("cp_best"), s.get("cp_model"),
+                                      s.get("mate_best"), s.get("mate_model"),
+                                      r.get("n_pieces", 64),
+                                      cp_threshold=cp_threshold,
+                                      mate_piece_gate=mate_piece_gate)
+        if verdict == "blunder":
+            out_rows.append({**r, "bucket": "normal"})
+            n_blunder += 1
+        else:
+            n_kept += 1
+    jsonl_write(out_path, out_rows)
+    stats = {"n_rows": len(out_rows), "n_blunder": n_blunder,
+             "n_within_baseline": n_kept, "n_scored": len(scoring)}
+    print(f"\u2705 poc mix: {stats}")
+    return stats
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Stage 2 - Slice DAgger (collect, or blend into a mix)")
     parser.add_argument("--model-path", default="")
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--out", default="")
     parser.add_argument("--n-episodes", type=int, default=400)
     parser.add_argument("--stop-pieces", type=int, default=16)
     parser.add_argument("--opening-plies", type=int, default=8)
@@ -294,13 +419,34 @@ def main() -> None:
     parser.add_argument("--dagger-rows", default="",
                         help="dagger collection jsonl (blend mode)")
     parser.add_argument("--max-share", type=float, default=MAX_SHARE)
+    parser.add_argument("--build-poc-mix", default="",
+                        help="poc mode: build a full on-policy correction "
+                             "mix from --dagger-rows, scoring model moves "
+                             "at --depth")
+    parser.add_argument("--cp-threshold", type=float,
+                        default=CP_BLUNDER_THRESHOLD)
+    parser.add_argument("--mate-piece-gate", type=int, default=MATE_PIECE_GATE)
     args = parser.parse_args()
+    if args.build_poc_mix:
+        if not args.dagger_rows:
+            parser.error("--build-poc-mix requires --dagger-rows")
+        from diag.common import ProgressLine
+        build_poc_mix(args.dagger_rows, args.build_poc_mix,
+                      engine_path=args.engine, depth=args.depth,
+                      workers=args.workers, cp_threshold=args.cp_threshold,
+                      mate_piece_gate=args.mate_piece_gate,
+                      force=args.force, progress=ProgressLine())
+        return
     if args.blend_into:
         if not args.dagger_rows:
             parser.error("--blend-into requires --dagger-rows")
+        if not args.out:
+            parser.error("--out is required with --blend-into")
         build_iteration2_mix(args.blend_into, args.dagger_rows, args.out,
                              max_share=args.max_share, seed=args.seed)
         return
+    if not args.out:
+        parser.error("--out is required for collection mode")
     if not args.model_path:
         parser.error("--model-path is required for collection mode")
     from diag.common import ProgressLine

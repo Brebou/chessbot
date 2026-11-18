@@ -12,8 +12,8 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | Submission candidate | `base_model` (paired score 0.231) |
 | Fallback | `results/sft/run1/final` (0.210) |
 | Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified (8 post-training runs, ~30 evals) |
-| Local suite | 127 passed / 7 skipped |
-| Current stage | **Ladder terminal after run4 → final submission `base_model`; write-up pending** |
+| Local suite | 131 passed / 7 skipped |
+| Current stage | run5 (extend run3's DAgger mix) + run6 (KL-anchored on-policy correction PoC) pre-registered; `base_model` remains submission until one qualifies |
 
 ## How models are evaluated (3 instruments, all paired vs base)
 
@@ -45,13 +45,16 @@ Robust conclusions (946k params):
   correctly refuses everything; off-policy SFT is exhausted as an Elo lever.
 - Legality is banked in the base (98% global / 95% end on our fixtures),
   preserved under all runs; monitor via guards only, never optimize.
-- On-policy model-negative pairs are actively harmful at this capacity:
-  run4 vs run3 at the matched step-1152 eval is engine −0.0453 vs −0.0156,
-  and run4's balanced score declines monotonically with training while
-  `val_ce_contrastive` *improves* (3.66 → 3.30). The model fits its own
-  visited states' negatives readily, but CE-pulling toward off-manifold
-  SF-best at exactly the states its current policy produces outweighs the
-  hone signal on ~1M params.
+- On-policy model-negative pairs are directionally negative at this
+  capacity: run4 vs run3 at the matched step-1152 eval is engine −0.0453
+  vs −0.0156 (~1–2σ — noisy, not conclusive), while `val_ce_contrastive`
+  *improves* (3.66 → 3.30): the model fits its own visited states'
+  negatives readily, but CE-pulling toward off-manifold SF-best at exactly
+  the states its current policy produces does not verifiably help. The
+  pure-CE on-policy dose question is NOT settled by run4 (run4 mixed in
+  pairs and a 2.9× CE-share jump); run3 remains the only run with a
+  monotone improving engine trend, stopped by epoch budget at its best
+  eval.
 - The one robust real improvement of the campaign is mate-in-1 (4.8% →
   7.4–10.2% across all variants); it never converts into engine score.
 
@@ -72,12 +75,27 @@ Robust conclusions (946k params):
   pairs + model-generated negatives from the same DAgger rollouts
   (“punish must also build”), (b) legal-masked CE, (c) soft targets from
   annotated `cp_second`. If none converts, submit `base_model`.
-- Ladder terminal (recorded after run4): (a) was already half-implemented
-  (CE-on-good ships in `ft_loss`); its new half, on-policy negatives,
-  made the engine trend strictly worse than run3. (b) declined: legality
-  is 97–100% top-1, no headroom. (c) declined: it reweights the same
-  off-policy CE signal that every run shows degrades engine play.
-  **Final submission: `base_model` (0.231).**
+- Pre-registered **run5** (extend the only improving trend): mix_it2
+  (run3's exact 5.8% DAgger blend), from `base_model`, epochs 5,
+  `--eval-every-steps 288`, `--plateau-patience 3`, lr 1e-4. run3 was
+  stopped by epoch budget at its best eval (−0.0156), never by plateau.
+  Kill: if no improving engine trend beyond run3's by end of epoch 3.
+- Pre-registered **run6** (full on-policy correction PoC, corpus-
+  independent stabilization): score the model's move on every model-≠-SF
+  state of dagger2 at depth 6 (`--build-poc-mix`); a state is a correction
+  row iff the played move loses > 150 cp, misses a forced mate in ≤ 2, or
+  fails to convert any forced mate with ≤ 10 pieces; everything else is
+  dropped. Train corrections-only (`--lr 5e-5`) with a real KL anchor:
+  forward KL(base ‖ policy) at the prediction position, λ = 0.1
+  (`--kl-lambda`), frozen base reference computed from `--base-path`.
+  Prediction: ~15–30% of the 87,860 states classify as blunders. Pass:
+  first checkpoint with `balanced − 2σ > 0`, or a sustained trend with
+  captures-late held ≥ 62%. Kill: KL fails to hold both by epoch 4 of a
+  381-step/epoch schedule.
+- Ladder rungs (b) legal-masked CE and (c) soft-target `cp_second` remain
+  declined: (b) legality is 97–100% top-1, no headroom; (c) reweights the
+  same off-policy CE signal every run shows degrades engine play.
+  `base_model` (0.231) stays the submission until run5/run6 qualify.
 
 - run4 pre-flight crash: `rollout_positions`/`dagger_collect` wrapped the
   `progress` object as `show` instead of its `.show` method (fast path
@@ -95,4 +113,6 @@ Robust conclusions (946k params):
 | ft/run2b (B1) | mix, no hinge | no change vs run1b |
 | ft/run2c (B2) | mix_w2, no hinge | mate1 10% sat., captures not recovered |
 | ft/run3 | DAgger from base (annotation pool) | 18,049 states collected+annotated (depth 10); 0 qualified; engine trend nearest zero of campaign; captures not recovered |
-| ft/run4 | mix_it2b (DAgger-2 15% cap: CE→normal + on-policy pairs), from base, 3 ep | 1,728 steps, 6 evals; balanced declines −0.033 → −0.047; engine best −0.0297; strictly worse than run3 at matched step-1152; no qualification → ladder terminal, submit `base_model` |
+| ft/run4 | mix_it2b (DAgger-2 15% cap: CE→normal + on-policy pairs), from base, 3 ep | 1,728 steps, 6 evals; balanced declines −0.033 → −0.047; engine best −0.0297; ~1–2σ below run3 at matched step-1152; no qualification |
+| ft/run5 | mix_it2, from base, 5 ep (pre-registered) | **pending** |
+| ft/run6 | poc corrections-only + KL anchor (λ 0.1, lr 5e-5) | **pending** |

@@ -1,7 +1,9 @@
 """Tests for the ft SFT package: losses, dataset, trainer, paired eval, dagger."""
 
 import argparse
+import copy
 import json
+import math
 import random
 import sys
 from collections import Counter
@@ -19,8 +21,9 @@ from chess_hw.model import CONFIG, ChessGPT, save_model
 from ft.eval.paired_eval import paired_engine_eval, paired_stop_criterion
 from ft.sft.dataset import (BUCKET_RATIOS_TRAIN, game_partition_key,
                             load_items, stratified_batches)
-from ft.sft.dagger import blend_dagger, dagger_collect, rollout_positions
-from ft.sft.losses import PAIR_CAP, contrastive_loss, ft_loss
+from ft.sft.dagger import (blend_dagger, build_poc_mix, classify_model_move,
+                           dagger_collect, rollout_positions)
+from ft.sft.losses import PAIR_CAP, anchor_kl, contrastive_loss, ft_loss
 from ft.sft.train_sft import (FTSFTConfig, FTSFTTrainer, ce_regressed,
                               legality_aborted)
 
@@ -380,6 +383,80 @@ def test_rollout_records_model_move(tiny_model):
     assert rows and all("model_move" in r for r in rows)
     for r in rows:
         chess.Board(r["fen"]).parse_uci(r["model_move"])
+
+
+def test_anchor_kl_math_and_zero_case():
+    logp = torch.log(torch.tensor([[0.5, 0.5]]))
+    assert anchor_kl(logp, logp).item() == pytest.approx(0.0, abs=1e-6)
+    ref_logp = torch.log(torch.tensor([[0.7, 0.3]]))
+    kl = anchor_kl(logp, ref_logp)
+    expected = 0.7 * math.log(0.7 / 0.5) + 0.3 * math.log(0.3 / 0.5)
+    assert kl.item() == pytest.approx(expected, rel=1e-4)
+    assert kl.item() > 0
+
+
+def test_ft_loss_kl_anchor_term():
+    torch.manual_seed(1)
+    model = ChessGPT(CONFIG)
+    ref = copy.deepcopy(model)
+    ids = torch.tensor([[TOKENIZER.bos_token_id, TOK["e2e4"]]])
+    lengths = torch.tensor([2])
+    targets = torch.tensor([TOK["e7e5"]])
+    weights = torch.tensor([1.0])
+    loss0, parts0 = ft_loss(model, ids, lengths, targets, weights,
+                            ref_model=ref, lambda_kl=0.5)
+    assert parts0["kl"] == pytest.approx(0.0, abs=1e-5)
+    with torch.no_grad():
+        for p in ref.parameters():
+            p.add_(0.05 * torch.randn_like(p))
+    loss1, parts1 = ft_loss(model, ids, lengths, targets, weights,
+                            ref_model=ref, lambda_kl=0.5)
+    assert parts1["kl"] > 1e-4
+    assert loss1.item() > loss0.item()
+
+
+def test_classify_model_move_rules():
+    assert classify_model_move(0, -300, None, None, 30) == "blunder"
+    assert classify_model_move(0, -100, None, None, 30) == "ok"
+    assert classify_model_move(0, -9950, None, -4, 30) == "blunder"
+    assert classify_model_move(None, None, 1, None, 40) == "blunder"
+    assert classify_model_move(None, None, 1, 2, 8) == "blunder"
+    assert classify_model_move(None, None, 5, 7, 8) == "blunder"
+    assert classify_model_move(None, None, 5, 7, 20) == "ok"
+    assert classify_model_move(None, None, 2, 2, 30) == "ok"
+
+
+def test_build_poc_mix_keeps_only_blunder_corrections(tmp_path):
+    dagger = tmp_path / "dagger.jsonl"
+    ce_a = {"bucket": "dagger", "key": "FEN_A", "start_fen": "FEN_A",
+            "history": ["e2e4"], "target": "e4d5", "weight": 1.0,
+            "ood": False, "n_pieces": 30}
+    ce_b = {"bucket": "dagger", "key": "FEN_B", "start_fen": "FEN_B",
+            "history": ["d2d4"], "target": "g1f3", "weight": 1.0,
+            "ood": False, "n_pieces": 8}
+    ce_c = {"bucket": "dagger", "key": "FEN_C", "start_fen": "FEN_C",
+            "history": ["c2c4"], "target": "d2d4", "weight": 1.0,
+            "ood": False, "n_pieces": 20}
+    pair_a = {**ce_a, "bucket": "contrastive", "bad": "a2a3"}
+    pair_b = {**ce_b, "bucket": "contrastive", "bad": "b1c3"}
+    with open(dagger, "w") as f:
+        for r in (ce_a, pair_a, ce_b, pair_b, ce_c):
+            f.write(json.dumps(r) + "\n")
+
+    def score_fn(fen, model_move):
+        if fen == "FEN_A":
+            return {"fen": fen, "cp_best": 0, "cp_model": -300,
+                    "mate_best": None, "mate_model": None}
+        return {"fen": fen, "cp_best": 0, "cp_model": 0,
+                "mate_best": None, "mate_model": None}
+
+    out = tmp_path / "poc.jsonl"
+    stats = build_poc_mix(str(dagger), str(out), score_fn=score_fn, force=True)
+    rows = [json.loads(l) for l in open(out) if l.strip()]
+    assert stats["n_rows"] == len(rows) == 1
+    assert rows[0]["key"] == "FEN_A"
+    assert rows[0]["bucket"] == "normal" and rows[0]["target"] == "e4d5"
+    assert stats["n_within_baseline"] == 1 and stats["n_scored"] == 2
 
 
 def test_rollout_and_collect_accept_progress_show_object(tiny_model, tmp_path):
