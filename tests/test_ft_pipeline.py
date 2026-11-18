@@ -304,6 +304,46 @@ def _fools_mate_row() -> dict:
             "mate_n": 1}
 
 
+def test_parse_bucket_weight_args():
+    from ft.data.build_buckets import parse_bucket_weight_args
+    assert parse_bucket_weight_args(["mate=2.0", "endgame_tb = 1.5"]) == {
+        "mate": 2.0, "endgame_tb": 1.5}
+    assert parse_bucket_weight_args([]) == {}
+    with pytest.raises(ValueError):
+        parse_bucket_weight_args(["bogus"])
+    with pytest.raises(ValueError):
+        parse_bucket_weight_args(["mate=x"])
+    from ft.data.build_buckets import merged_bucket_weights
+    with pytest.raises(ValueError):
+        merged_bucket_weights(parse_bucket_weight_args(["nope=1.0"]))
+    with pytest.raises(ValueError):
+        merged_bucket_weights(parse_bucket_weight_args(["mate=-1"]))
+    with pytest.raises(ValueError):
+        merged_bucket_weights(parse_bucket_weight_args(["mate=0"]))
+
+
+def test_bucket_weight_override_scales_rows(mini_pipeline, tmp_path):
+    from ft.data.build_buckets import build_bucket_dataset
+    _, paths = mini_pipeline
+    extra = tmp_path / "pad.jsonl"
+    with open(extra, "w") as f:
+        f.write(json.dumps(_fools_mate_row()) + "\n")
+    counts = build_bucket_dataset(read_games(paths["games"]),
+                                  paths["positions"], paths["annotations"],
+                                  str(tmp_path / "mix_weighted.jsonl"),
+                                  extra_rows_paths=(str(extra),),
+                                  bucket_weight_overrides={"mate": 2.0,
+                                                           "normal": 0.5},
+                                  force=True)
+    assert counts["mate"] >= 1
+    weights = {json.loads(l)["bucket"]: json.loads(l)["weight"]
+               for l in (tmp_path / "mix_weighted.jsonl").read_text().splitlines()
+               if l.strip()}
+    assert weights["mate"] == 2.0
+    assert weights["normal"] == 0.5
+    assert weights["contrastive"] == 1.0
+
+
 def test_extra_rows_add_mate_volume_to_mix(mini_pipeline, tmp_path):
     from ft.data.build_buckets import build_bucket_dataset
     _, paths = mini_pipeline
