@@ -12,7 +12,7 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | Submission candidate | `base_model` (paired score 0.231) |
 | Fallback | `results/sft/run1/final` (0.210) |
 | Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified yet (18+ evals across 7 runs) |
-| Local suite | 124 passed / 7 skipped |
+| Local suite | 126 passed / 7 skipped |
 | Current stage | Stage-2 DAgger (run3): on-policy collection from `base_model`, blended ≤15% into the iteration-1 mix |
 
 ## How models are evaluated (3 instruments, all paired vs base)
@@ -34,6 +34,7 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | mix_w2 (`--bucket-weight mate=2.0`), hinge on (run2a) | 10.2%, rising at abort | 55.6–57.0% | ~−0.033 | −0.058 | none |
 | mix, hinge off (`--lambda-contrast 0`) (run2b) | 8.4–8.8% | 58.2–62.5% | ~−0.03 | −0.015…−0.054 | none |
 | mix_w2, hinge off (run2c / B2) | 10.0% sat. | 55.7–58.5% | −0.03…−0.048 | −0.031…−0.056 | none |
+| mix_it2 = mix + 5.8% DAgger rows, 18,049 on-policy states, engine-labeled (run3) | 8.4–9.2% | 59.0–59.5% (not recovered) | −0.042 → **−0.0156** (closest-to-zero of the campaign, ~1.1σ) | −0.039…−0.034 | none |
 
 Robust conclusions (946k params):
 - mate1 dose-responds to CE weight (4.8 → 10%) then saturates; the
@@ -48,6 +49,12 @@ Robust conclusions (946k params):
 
 - Checkpoints qualify only via `balanced − 2σ > 0`; fixtures are diagnostics.
 - Fixtures deltas only count beyond their noise bands (see above).
+- Note: contrastive rows already carry full CE toward the good move at
+  weight 1.0 (`ft_loss` runs `weighted_ce` over the whole batch) — "punish
+  must also build" is the implemented shape, no extra term needed.
+- DAgger OOD detector is inert at the (pieces, material-balance)
+  signature granularity (n_ood = 0 everywhere); harmless — the share cap
+  never trims at 18k rows.
 - Stage-2 (run3) started from `base_model`, *not* the failed SFT policies:
   no SFT checkpoint earned the chain, and re-exposure to the same mix
   doubles the drift the proxy metric penalizes.
@@ -67,4 +74,5 @@ Robust conclusions (946k params):
 | ft/run2a | mix_w2, patience 4 | mate1 10.2% rising; aborted by balanced plateau |
 | ft/run2b (B1) | mix, no hinge | no change vs run1b |
 | ft/run2c (B2) | mix_w2, no hinge | mate1 10% sat., captures not recovered |
-| ft/run3 | DAgger from base (annotation pool) | first attempt crashed on a `chess.engine` import binding in spawn workers -- fixed, **pending** |
+| ft/run3 | DAgger from base (annotation pool) | 18,049 states collected+annotated (depth 10); 0 qualified; engine trend nearest zero of campaign; captures not recovered |
+| ft/run4 | mix_it2 + model-negative pair rows (--emit-pairs) | **pending** |

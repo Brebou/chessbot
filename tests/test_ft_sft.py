@@ -372,3 +372,25 @@ def test_stratified_batches_epoch_is_a_full_pass_over_the_scarcest_bucket():
         counts = Counter(it.bucket for it in batch)
         assert counts["mate"] == 2
         assert counts["normal"] == 4
+
+
+def test_rollout_records_model_move(tiny_model):
+    rows = rollout_positions(str(tiny_model), n_episodes=1, stop_pieces=10,
+                             max_plies=4, seed=5, device="cpu")
+    assert rows and all("model_move" in r for r in rows)
+    for r in rows:
+        chess.Board(r["fen"]).parse_uci(r["model_move"])
+
+
+def test_dagger_emit_pairs_makes_contrastive_rows(tiny_model, tmp_path):
+    out = tmp_path / "dagger.jsonl"
+    stats = dagger_collect(str(tiny_model), str(out), n_episodes=2,
+                           stop_pieces=30, max_plies=4, seed=0, device="cpu",
+                           annotate_fn=_stub_annotate, emit_pairs=True,
+                           force=True)
+    rows = list(json.loads(l) for l in open(out) if l.strip())
+    pairs = [r for r in rows if r["bucket"] == "contrastive"]
+    assert stats["n_rows"] == len(rows) > len(pairs) >= 0
+    for r in pairs:
+        assert r["bad"] != r["target"]
+        chess.Board(r["key"]).parse_uci(r["bad"])
