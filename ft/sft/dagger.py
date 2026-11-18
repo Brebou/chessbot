@@ -23,6 +23,7 @@ import random
 import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+from collections import Counter
 
 import sys
 from pathlib import Path
@@ -57,13 +58,14 @@ def load_elite_signatures(elite_positions_path: str) -> List[tuple]:
             for r in jsonl_read(elite_positions_path) if r.get("fen_before")]
 
 
-def is_ood(sig: tuple, elite_sigs: List[tuple], tol: int = OOD_TOL) -> bool:
-    if not elite_sigs:
+def is_ood(sig: tuple, elite_index: set, tol: int = OOD_TOL) -> bool:
+    if not elite_index:
         return True
     np_, bal = sig
-    for en, eb in elite_sigs:
-        if abs(en - np_) <= tol and abs(eb - bal) <= tol:
-            return False
+    for dx in range(-tol, tol + 1):
+        for db in range(-tol, tol + 1):
+            if (np_ + dx, bal + db) in elite_index:
+                return False
     return True
 
 
@@ -180,7 +182,7 @@ def dagger_collect(model_path: str, out: str, *, n_episodes: int = 400,
                                   opening_plies=opening_plies, seed=seed,
                                   device=device, batch_size=batch_size,
                                   max_plies=max_plies)
-    elite = load_elite_signatures(elite_positions_path)
+    elite_index = set(load_elite_signatures(elite_positions_path))
     anns = _annotate(positions, engine_path=engine_path, depth=depth,
                      workers=workers, annotate_fn=annotate_fn, progress=progress)
     rows: List[dict] = []
@@ -196,7 +198,7 @@ def dagger_collect(model_path: str, out: str, *, n_episodes: int = 400,
         rows.append({"bucket": "dagger", "key": r["fen"],
                      "start_fen": r["fen"], "history": r["history"],
                      "target": target, "weight": 1.0,
-                     "ood": is_ood(position_signature(r["fen"]), elite),
+                     "ood": is_ood(position_signature(r["fen"]), elite_index),
                      "n_pieces": n_pieces_from_fen(r["fen"])})
     rows.sort(key=lambda r: not r["ood"])
     jsonl_write(out_path, rows)
@@ -221,10 +223,30 @@ def blend_dagger(rows: List[dict], dagger_rows: List[dict], *,
     return held + order[:max_dagger]
 
 
+def build_iteration2_mix(base_mix_path: str, dagger_path: str, out: str, *,
+                         max_share: float = MAX_SHARE, seed: int = 0) -> dict:
+    """Fold dagger rows into an iteration-1 mix (OOD rows first, capped at
+    max_share of the final dataset) rebucketing them as normal so the
+    stratified trainer draws them."""
+    rows = list(jsonl_read(base_mix_path))
+    dagger_rows = list(jsonl_read(dagger_path))
+    blended = blend_dagger(rows, dagger_rows, max_share=max_share, seed=seed)
+    n_dagger = 0
+    for r in blended:
+        if r["bucket"] == "dagger":
+            r["bucket"] = "normal"
+            n_dagger += 1
+    jsonl_write(out, blended)
+    counts = dict(Counter(r["bucket"] for r in blended))
+    print(f"\u2705 iteration-2 mix: {len(blended)} rows {counts} "
+          f"(dagger folded: {n_dagger})")
+    return counts
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stage 2 - Slice DAgger collection")
-    parser.add_argument("--model-path", required=True)
+        description="Stage 2 - Slice DAgger (collect, or blend into a mix)")
+    parser.add_argument("--model-path", default="")
     parser.add_argument("--out", required=True)
     parser.add_argument("--n-episodes", type=int, default=400)
     parser.add_argument("--stop-pieces", type=int, default=16)
@@ -238,7 +260,21 @@ def main() -> None:
     parser.add_argument("--elite-positions", default="")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--blend-into", default="",
+                        help="blend mode: fold --dagger-rows into this "
+                             "iteration-1 mix and write --out")
+    parser.add_argument("--dagger-rows", default="",
+                        help="dagger collection jsonl (blend mode)")
+    parser.add_argument("--max-share", type=float, default=MAX_SHARE)
     args = parser.parse_args()
+    if args.blend_into:
+        if not args.dagger_rows:
+            parser.error("--blend-into requires --dagger-rows")
+        build_iteration2_mix(args.blend_into, args.dagger_rows, args.out,
+                             max_share=args.max_share, seed=args.seed)
+        return
+    if not args.model_path:
+        parser.error("--model-path is required for collection mode")
     dagger_collect(args.model_path, args.out, n_episodes=args.n_episodes,
                    stop_pieces=args.stop_pieces, opening_plies=args.opening_plies,
                    max_plies=args.max_plies, device=args.device,
