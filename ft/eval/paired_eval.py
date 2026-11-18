@@ -13,16 +13,47 @@ openings with fixed colors; the proxy delta = mean candidate score - 0.5.
 from __future__ import annotations
 
 import random
+from dataclasses import asdict
 from typing import Dict, List, Sequence, Tuple
 
 import chess
 
-from chess_hw.match import (load_openings, run_tasks, select_openings,
-                            score_for, _engine_task, _init_worker, _pair_task)
+from chess_hw.match import (EnginePlayer, load_openings, play_game, run_tasks,
+                            select_openings, score_for, _get_player,
+                            _pair_task)
+from chess_hw.play import MoveChoice
+from diag.fast_engine import FastEngine
+
+
+class _FastEnginePlayer:
+    """EnginePlayer with the move-identical FastEngine (persistent TT, ~4x)."""
+
+    def __init__(self, level: int, seed: str):
+        self.name = f"engine-L{level}"
+        self.engine = FastEngine(level=level, seed=seed)
+
+    def choose(self, board: chess.Board) -> MoveChoice:
+        return MoveChoice(self.engine.best_move(board), 1)
+
+
+def _fast_engine_task(task):
+    name, level, seed, oid, model_color = task
+    model = _get_player(name)
+    seed_str = f"engine-{seed}-{level}-{oid}-{model_color}"
+    if level == 0:
+        engine = EnginePlayer(level, seed=seed_str)
+    else:
+        engine = _FastEnginePlayer(level, seed=seed_str)
+    opening = load_openings()[oid]
+    white, black = (model, engine) if model_color == "white" else (engine, model)
+    rec = play_game(white, black, opening, oid)
+    rec.meta = {"level": level, "seed": seed, "model_color": model_color}
+    return asdict(rec)
 
 
 def _engine_records(model_path: str, tasks, workers: int, progress: bool = False):
-    return run_tasks(_engine_task, tasks, {"m": str(model_path)}, workers, progress)
+    return run_tasks(_fast_engine_task, tasks, {"m": str(model_path)},
+                     workers, progress)
 
 
 def paired_engine_eval(candidate_path: str, base_path: str, *, levels=(0, 1, 2, 3, 4),

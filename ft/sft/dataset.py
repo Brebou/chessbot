@@ -61,8 +61,9 @@ def load_items(mix_path: str, tokenizer) -> Tuple[List[SFTItem], List[SFTItem]]:
 
 def stratified_batches(items: List["SFTItem"], batch_size: int, seed: int,
                        epoch: int) -> Iterator[List["SFTItem"]]:
-    """Epoch = floor(min bucket supply / ratio) batches, each with the exact
-    slot allocation; buckets cycle through fresh shuffles when exhausted."""
+    """Epoch = floor(min bucket supply / ratio) examples = one pass over the
+    scarcest bucket at exact slot allocation; buckets cycle through fresh
+    shuffles when exhausted."""
     rng = random.Random(f"strat-{seed}-{epoch}")
     by_bucket: Dict[str, List[int]] = defaultdict(list)
     for i, it in enumerate(items):
@@ -71,7 +72,7 @@ def stratified_batches(items: List["SFTItem"], batch_size: int, seed: int,
         rng.shuffle(v)
     scale = min(len(idxs) / BUCKET_RATIOS_TRAIN[b]
                 for b, idxs in by_bucket.items() if BUCKET_RATIOS_TRAIN.get(b, 0) > 0)
-    n_batches = max(1, int(scale))
+    n_batches = max(1, int(scale) // batch_size)
     cursor = {b: 0 for b in by_bucket}
     for _ in range(n_batches):
         batch: List["SFTItem"] = []
