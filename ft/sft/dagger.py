@@ -107,10 +107,6 @@ def rollout_positions(model_path: str, n_episodes: int, *, stop_pieces: int = 16
             board, hist, rng = a["board"], a["hist"], a["rng"]
             if board.outcome(claim_draw=True) is not None:
                 continue
-            if n_pieces_from_fen(board.fen()) > stop_pieces:
-                key = board.fen()
-                if key not in rows:
-                    rows[key] = {"fen": key, "history": list(hist)}
             if n_pieces_from_fen(board.fen()) <= stop_pieces:
                 continue
             legal = list(board.legal_moves)
@@ -118,6 +114,10 @@ def rollout_positions(model_path: str, n_episodes: int, *, stop_pieces: int = 16
                 continue
             mv = choice.move if choice.move is not None \
                 else rng.choice(legal)
+            key = board.fen()
+            if key not in rows:
+                rows[key] = {"fen": key, "history": list(hist),
+                             "model_move": mv.uci()}
             board.push(mv)
             hist.append(mv.uci())
             if len(hist) < opening_plies + max_plies:
@@ -180,6 +180,7 @@ def dagger_collect(model_path: str, out: str, *, n_episodes: int = 400,
                    depth: int = 14, workers: int = 8,
                    elite_positions_path: str = "",
                    annotate_fn: Optional[Callable] = None,
+                   emit_pairs: bool = False,
                    force: bool = False, progress=None) -> dict:
     show = progress if progress is not None else _noop
     out_path = Path(out)
@@ -213,6 +214,17 @@ def dagger_collect(model_path: str, out: str, *, n_episodes: int = 400,
                      "target": target, "weight": 1.0,
                      "ood": is_ood(position_signature(r["fen"]), elite_index),
                      "n_pieces": n_pieces_from_fen(r["fen"])})
+        bad = r.get("model_move")
+        if emit_pairs and bad and bad != target:
+            try:
+                chess.Board(r["fen"]).parse_uci(bad)
+            except ValueError:
+                continue
+            rows.append({"bucket": "contrastive", "key": r["fen"],
+                         "start_fen": r["fen"], "history": r["history"],
+                         "target": target, "bad": bad, "weight": 1.0,
+                         "ood": is_ood(position_signature(r["fen"]), elite_index),
+                         "n_pieces": n_pieces_from_fen(r["fen"])})
     rows.sort(key=lambda r: not r["ood"])
     jsonl_write(out_path, rows)
     stats = {"n_positions": len(positions), "n_rows": len(rows),
@@ -273,6 +285,9 @@ def main() -> None:
     parser.add_argument("--elite-positions", default="")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--emit-pairs", action="store_true",
+                        help="also emit (good=engine best, bad=model move) "
+                             "contrastive rows for visited states")
     parser.add_argument("--blend-into", default="",
                         help="blend mode: fold --dagger-rows into this "
                              "iteration-1 mix and write --out")
@@ -295,6 +310,7 @@ def main() -> None:
                    batch_size=args.batch_size, engine_path=args.engine,
                    depth=args.depth, workers=args.workers,
                    elite_positions_path=args.elite_positions, seed=args.seed,
+                   emit_pairs=args.emit_pairs,
                    force=args.force, progress=ProgressLine())
 
 
