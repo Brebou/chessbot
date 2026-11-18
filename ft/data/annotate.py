@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 import chess
+import chess.engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -59,7 +60,6 @@ class StockfishAnnotator:
     @property
     def engine(self):
         if self._engine is None:
-            import chess.engine
             self._engine = chess.engine.SimpleEngine.popen_uci(self.path)
             self._engine.configure({"Threads": 1})
         return self._engine
@@ -153,7 +153,6 @@ _WORKER_ANNOTATOR = {}
 def annotate_task(task):
     """Module-level spawn worker: (fen, uci_played, engine_path, depth, join_path)."""
     fen, uci_played, engine_path, depth, join_path = task
-    import chess.engine as _ce
 
     key = (engine_path, depth, join_path)
     if key not in _WORKER_ANNOTATOR:
@@ -174,7 +173,7 @@ def annotate_task(task):
         after = chess.Board(fen)
         after.push(played)
         block["cp_played_after"] = -score_to_mover(
-            annotator.stockfish.engine.analyse(after, _ce.Limit(depth=depth))["score"])
+            annotator.stockfish.engine.analyse(after, chess.engine.Limit(depth=depth))["score"])
     row = {"fen": fen, "uci_played": uci_played,
            "cp_root": block["cp_best"], **block,
            "is_check_before": chess.Board(fen).is_check()}

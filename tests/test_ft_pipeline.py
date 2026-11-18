@@ -344,6 +344,17 @@ def test_bucket_weight_override_scales_rows(mini_pipeline, tmp_path):
     assert weights["contrastive"] == 1.0
 
 
+def test_annotator_import_binds_chess_engine_submodule():
+    import subprocess
+    import sys
+    code = ("import sys; sys.path.insert(0, '.')\n"
+            "from ft.data.annotate import StockfishAnnotator\n"
+            "import chess\nassert hasattr(chess, 'engine')\n")
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                          text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_extra_rows_add_mate_volume_to_mix(mini_pipeline, tmp_path):
     from ft.data.build_buckets import build_bucket_dataset
     _, paths = mini_pipeline
