@@ -382,6 +382,27 @@ def test_rollout_records_model_move(tiny_model):
         chess.Board(r["fen"]).parse_uci(r["model_move"])
 
 
+def test_rollout_and_collect_accept_progress_show_object(tiny_model, tmp_path):
+    class StubProgress:
+        def __init__(self):
+            self.messages = []
+
+        def show(self, message, force=False):
+            self.messages.append(message)
+
+    prog = StubProgress()
+    rows = rollout_positions(str(tiny_model), n_episodes=1, stop_pieces=10,
+                             max_plies=2, seed=5, device="cpu", progress=prog)
+    assert prog.messages
+    prog2 = StubProgress()
+    out = tmp_path / "dagger_prog.jsonl"
+    dagger_collect(str(tiny_model), str(out), n_episodes=1, stop_pieces=30,
+                   max_plies=2, seed=0, device="cpu",
+                   annotate_fn=_stub_annotate, emit_pairs=False,
+                   force=True, progress=prog2)
+    assert prog2.messages
+
+
 def test_dagger_emit_pairs_makes_contrastive_rows(tiny_model, tmp_path):
     out = tmp_path / "dagger.jsonl"
     stats = dagger_collect(str(tiny_model), str(out), n_episodes=2,

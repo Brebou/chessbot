@@ -80,7 +80,7 @@ def rollout_positions(model_path: str, n_episodes: int, *, stop_pieces: int = 16
                       batch_size: int = 512, max_plies: int = 120,
                       progress=None) -> List[dict]:
     """Greedy model self-play; returns {"fen", "history"} per visited state."""
-    show = progress if progress is not None else _noop
+    show = progress.show if progress is not None else _noop
     tokenizer = ChessTokenizer()
     model = load_model(model_path, device=device)
     probe = FastProbePlayer(model, tokenizer, batch_size=batch_size)
@@ -182,7 +182,7 @@ def dagger_collect(model_path: str, out: str, *, n_episodes: int = 400,
                    annotate_fn: Optional[Callable] = None,
                    emit_pairs: bool = False,
                    force: bool = False, progress=None) -> dict:
-    show = progress if progress is not None else _noop
+    show = progress.show if progress is not None else _noop
     out_path = Path(out)
     if out_path.exists() and not force:
         rows = list(jsonl_read(out_path))

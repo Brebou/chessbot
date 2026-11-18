@@ -63,6 +63,10 @@ Robust conclusions (946k params):
   (“punish must also build”), (b) legal-masked CE, (c) soft targets from
   annotated `cp_second`. If none converts, submit `base_model`.
 
+- run4 pre-flight crash: `rollout_positions`/`dagger_collect` wrapped the
+  `progress` object as `show` instead of its `.show` method (fast path
+  untested — CLI progress only); fixed with a stub-object regression test.
+
 ## Run log
 
 | Run | Config | Outcome |
