@@ -42,6 +42,7 @@ class PipelineConfig:
     tb_dir: str = ""            # Syzygy 3-4-5 directory; Phase D skipped if empty
     tb_per_type: int = 15_000
     extra_rows: str = ""        # comma-separated pre-bucketed rows (e.g. pad_mates)
+    bucket_weights: str = ""    # comma-separated 'bucket=value' CE weight overrides
     workers: int = 8
     seed: int = 0
     target_total: int = 0       # 0 = keep all classified rows (Phase E)
@@ -177,6 +178,9 @@ def run_pipeline(cfg: PipelineConfig, annotate_fn=None) -> dict:
 
     tb_adapter = build_tb_adapter(cfg.tb_dir)
     extras = tuple(p for p in cfg.extra_rows.split(",") if p.strip())
+    from ft.data.build_buckets import parse_bucket_weight_args
+    weight_overrides = parse_bucket_weight_args(
+        [s for s in cfg.bucket_weights.split(",") if s.strip()])
     from diag.common import ProgressLine
     print(f"⏳ Phase E: building buckets from {jsonl_count(paths['positions'])} "
           f"positions (single-threaded, minutes; live progress below)...")
@@ -185,6 +189,7 @@ def run_pipeline(cfg: PipelineConfig, annotate_fn=None) -> dict:
                                   paths["mix"], tb_rows_path=tb_rows_path or "",
                                   extra_rows_paths=extras,
                                   tb_adapter=tb_adapter,
+                                  bucket_weight_overrides=weight_overrides,
                                   target_total=cfg.target_total or None,
                                   seed=cfg.seed, force=cfg.force,
                                   progress=ProgressLine())

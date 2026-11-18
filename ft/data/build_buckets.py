@@ -49,6 +49,27 @@ BUCKET_WEIGHTS = {"normal": 1.0, "mate": 1.0, "endgame_tb": 1.5,
                   "contrastive": 1.0, "anchor": 1.0}
 
 
+def merged_bucket_weights(overrides=None) -> Dict[str, float]:
+    weights = dict(BUCKET_WEIGHTS)
+    for name, value in (overrides or {}).items():
+        if name not in BUCKET_WEIGHTS or float(value) <= 0:
+            raise ValueError(f"invalid bucket weight override: {name}={value!r}")
+        weights[name] = float(value)
+    return weights
+
+
+def parse_bucket_weight_args(specs) -> Dict[str, float]:
+    overrides = {}
+    try:
+        for spec in specs or ():
+            name, _, raw = spec.partition("=")
+            overrides[name.strip()] = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"--bucket-weight expects 'bucket=value', got "
+                         f"{spec!r}") from exc
+    return overrides
+
+
 def classify_position(ann: dict) -> Optional[str]:
     """Bucket for one annotated position (priority order); None = drop."""
     if not ann.get("sanity", True):
@@ -75,8 +96,10 @@ def classify_position(ann: dict) -> Optional[str]:
 def build_rows(games: List[str], positions_path: str, annotations_path: str,
                *, tb_rows_path: str = "",
                extra_rows_paths: Tuple[str, ...] = (), tb_adapter=None,
+               bucket_weight_overrides: Optional[Dict[str, float]] = None,
                seed: int = 0, progress=None) -> "tuple[List[dict], Counter]":
     """Attach real histories to annotated positions, classify, dedup."""
+    weights = merged_bucket_weights(bucket_weight_overrides)
     positions = list(jsonl_read(positions_path))
     anns = {r["fen"]: r for r in jsonl_read(annotations_path)}
     by_game: Dict[str, List[dict]] = defaultdict(list)
@@ -153,7 +176,7 @@ def build_rows(games: List[str], positions_path: str, annotations_path: str,
             else:
                 drop_stats["bad_extra_row"] += 1
     for row in rows:
-        row["weight"] = BUCKET_WEIGHTS[row["bucket"]]
+        row["weight"] = weights[row["bucket"]]
     return rows, drop_stats
 
 
@@ -228,6 +251,7 @@ def build_bucket_dataset(games: List[str], positions_path: str,
                          tb_rows_path: str = "",
                          extra_rows_paths: Tuple[str, ...] = (),
                          tb_adapter=None,
+                         bucket_weight_overrides: Optional[Dict[str, float]] = None,
                          target_total: Optional[int] = None, seed: int = 0,
                          force: bool = False, progress=None) -> Dict[str, int]:
     out_path = Path(out)
@@ -238,8 +262,9 @@ def build_bucket_dataset(games: List[str], positions_path: str,
     rows, drop_stats = build_rows(games, positions_path, annotations_path,
                                   tb_rows_path=tb_rows_path,
                                   extra_rows_paths=extra_rows_paths,
-                                  tb_adapter=tb_adapter, seed=seed,
-                                  progress=progress)
+                                  tb_adapter=tb_adapter,
+                                  bucket_weight_overrides=bucket_weight_overrides,
+                                  seed=seed, progress=progress)
     if drop_stats:
         print(f"⚠️ dropped: {dict(drop_stats)}")
     rows = _apply_caps(rows, seed)
@@ -263,6 +288,9 @@ def main() -> None:
     parser.add_argument("--extra-rows", action="append", default=[],
                         help="extra pre-bucketed rows (e.g. the pad_mates "
                              "output); repeatable")
+    parser.add_argument("--bucket-weight", action="append", default=[],
+                        help="override a bucket CE weight, e.g. mate=2.0; "
+                             "repeatable")
     parser.add_argument("--tb-dir", default="",
                         help="Syzygy dir; relabels elite rows with <= 5 pieces "
                              "by the tablebase (they keep their real history)")
@@ -281,6 +309,8 @@ def main() -> None:
                                   args.out, tb_rows_path=args.tb_rows,
                                   extra_rows_paths=tuple(args.extra_rows),
                                   tb_adapter=tb_adapter,
+                                  bucket_weight_overrides=parse_bucket_weight_args(
+                                      args.bucket_weight),
                                   target_total=args.target_total or None,
                                   seed=args.seed, force=args.force,
                                   progress=ProgressLine())
