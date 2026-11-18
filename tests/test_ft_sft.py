@@ -4,6 +4,7 @@ import argparse
 import json
 import random
 import sys
+from collections import Counter
 from pathlib import Path
 
 import chess
@@ -322,3 +323,21 @@ def test_fast_engine_move_identical_levels_1_to_3():
         a = Engine(level=3, seed=seed).best_move(board)
         b = FastEngine(level=3, seed=seed).best_move(board)
         assert (a.uci() if a else None) == (b.uci() if b else None)
+
+class _BucketOnly:
+    def __init__(self, bucket: str):
+        self.bucket = bucket
+
+
+def test_stratified_batches_epoch_is_a_full_pass_over_the_scarcest_bucket():
+    supplies = {"mate": 20, "normal": 46, "contrastive": 15,
+                "endgame_tb": 15, "anchor": 5}
+    items = [b for b, n in supplies.items() for _ in range(n)]
+    items = [_BucketOnly(b) for b in items]
+    batches = list(stratified_batches(items, batch_size=10, seed=0, epoch=0))
+    assert len(batches) == 10
+    assert all(len(b) == 11 for b in batches)  # round(45/20/15/15/5 * 10) = 4/2/2/2/1
+    for batch in batches:
+        counts = Counter(it.bucket for it in batch)
+        assert counts["mate"] == 2
+        assert counts["normal"] == 4
