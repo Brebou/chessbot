@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -232,3 +233,56 @@ def test_rollout_positions_model_moves(tiny_model):
                              max_plies=3, seed=3, device="cpu")
     assert rows
     assert all("history" in r and "fen" in r for r in rows)
+
+# -- fixtures -------------------------------------------------------------------
+
+def _sheds_material_game(rng) -> str:
+    board = chess.Board()
+    moves = []
+    while len(board.piece_map()) > 10:
+        legal = list(board.legal_moves)
+        caps = [m for m in legal if board.is_capture(m)]
+        if not caps:
+            caps = legal
+        if not caps or board.outcome(claim_draw=True) is not None:
+            break
+        mv = caps[rng.randrange(len(caps))]
+        moves.append(mv.uci())
+        board.push(mv)
+    return " ".join(moves)
+
+
+def test_build_position_fixtures_from_games_fill_end_bin():
+    from ft.data.sample_positions import bin_for_pieces
+    from ft.eval.metrics import build_position_fixtures
+    rng = random.Random(0)
+    games = [_sheds_material_game(rng) for _ in range(60)]
+    bins = build_position_fixtures(20, seed=0, games=games)
+    assert len(bins["end"]) == 20
+    assert len(bins["mid"]) == 20
+    for row in bins["end"]:
+        assert bin_for_pieces(len(chess.Board(row["fen"]).piece_map())) == "end"
+    board = chess.Board()
+    for uci in bins["end"][0]["history"]:
+        board.push_uci(uci)
+    assert board.fen() == bins["end"][0]["fen"]
+
+
+def test_build_fixtures_caches_deterministic_and_metrics_run(tiny_model, tmp_path):
+    from ft.eval.metrics import build_fixtures, fixture_metrics
+    d = tmp_path / "fx"
+    games = tmp_path / "games.jsonl"
+    games.write_text(json.dumps({"moves": "e2e4 e7e5 g1f3 g8f6"}) + "\n")
+    build_fixtures(str(d), n_mate1=6, n_per_bin=4, seed=1,
+                   games_path=str(games))
+    first = {p.name: p.read_text() for p in sorted(d.glob("*.jsonl"))}
+    assert len(first) == 4
+    mtimes = {p.name: p.stat().st_mtime_ns for p in sorted(d.glob("*.jsonl"))}
+    build_fixtures(str(d), n_mate1=6, n_per_bin=4, seed=1, games_path="")
+    assert {p.name: p.read_text() for p in sorted(d.glob("*.jsonl"))} == first
+    assert {p.name: p.stat().st_mtime_ns for p in sorted(d.glob("*.jsonl"))} == mtimes
+    metrics = fixture_metrics(str(tiny_model / "model.safetensors"), str(d),
+                              device="cpu")
+    assert 0.0 <= metrics["mate1_top1_rate"] <= 1.0
+    assert 0.0 <= metrics["top1_legal_end"] <= 1.0
+    assert "top1_legal_global" in metrics

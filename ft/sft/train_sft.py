@@ -104,6 +104,8 @@ class FTSFTConfig:
     eval_bootstrap: int = 2000
     # fixtures diagnostics
     fixtures_dir: str = ""
+    fixtures_games: str = ""     # Phase A games jsonl; real positions for the
+                                 # per-bin fixtures (random playouts can't fill end)
     n_fixture_mate1: int = 500
     n_fixture_per_bin: int = 500
     # stop / retention
@@ -225,7 +227,8 @@ class FTSFTTrainer:
         if not self.cfg.fixtures_dir:
             return None
         build_fixtures(self.cfg.fixtures_dir, n_mate1=self.cfg.n_fixture_mate1,
-                       n_per_bin=self.cfg.n_fixture_per_bin, seed=self.cfg.seed)
+                       n_per_bin=self.cfg.n_fixture_per_bin, seed=self.cfg.seed,
+                       games_path=self.cfg.fixtures_games)
         return fixture_metrics(str(model_dir), self.cfg.fixtures_dir,
                                device=self.device)
 

@@ -13,8 +13,9 @@ fallback < 5%, mate1 > 70%, winning captures > 85%, losing captures < 12%.
 from __future__ import annotations
 
 import random
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import chess
 
@@ -23,6 +24,7 @@ from chess_hw.tokenizer import ChessTokenizer
 from diag.fast_probe import FastProbePlayer
 from diag.see import see
 from ft.common.board_io import bin_for_pieces, history_window, n_pieces_from_fen
+from ft.common.games_io import read_games
 from ft.common.serialize import jsonl_write, jsonl_read
 
 
@@ -70,9 +72,31 @@ def build_mate1_fixtures(n: int = 500, seed: int = 0,
     return out
 
 
-def build_position_fixtures(n_per_bin: int, seed: int = 0) -> Dict[str, List[dict]]:
+def build_position_fixtures(n_per_bin: int, seed: int = 0,
+                            games: Optional[List[str]] = None
+                            ) -> Dict[str, List[dict]]:
     rng = random.Random(f"pos-fixture-{seed}")
     by_bin: Dict[str, List[dict]] = {"mid": [], "late": [], "end": []}
+    need = n_per_bin * 3
+    if games:
+        for game in games:
+            if sum(len(v) for v in by_bin.values()) >= need:
+                break
+            per_game = Counter()
+            board = chess.Board()
+            for i, uci in enumerate(game.split()):
+                if all(per_game[b] >= 2 for b in by_bin):
+                    break
+                name = bin_for_pieces(n_pieces_from_fen(board.fen()))
+                if per_game[name] < 2 and len(by_bin[name]) < n_per_bin:
+                    by_bin[name].append({"fen": board.fen(),
+                                         "history": game.split()[:i]})
+                    per_game[name] += 1
+                try:
+                    board.push_uci(uci)
+                except ValueError:
+                    break
+        return by_bin
     tries = 0
     while (sum(len(v) for v in by_bin.values()) < n_per_bin * 3
            and tries < n_per_bin * 200):
@@ -88,19 +112,25 @@ def build_position_fixtures(n_per_bin: int, seed: int = 0) -> Dict[str, List[dic
 
 
 def build_fixtures(out_dir: str, *, n_mate1: int = 500, n_per_bin: int = 500,
-                   seed: int = 0) -> dict:
+                   seed: int = 0, games_path: str = "") -> dict:
     d = Path(out_dir)
     d.mkdir(parents=True, exist_ok=True)
     written = {}
+    names = ("mid", "late", "end")
+    pos_paths = {name: d / f"positions_{name}_{n_per_bin}.jsonl"
+                 for name in names}
+    if not all(q.exists() for q in pos_paths.values()):
+        games = list(read_games(games_path)) if games_path else None
+        for name, rows in build_position_fixtures(n_per_bin, seed,
+                                                  games=games).items():
+            if not pos_paths[name].exists():
+                jsonl_write(pos_paths[name], rows)
+    for name in names:
+        written[f"positions_{name}"] = str(pos_paths[name])
     p = d / f"mate1_{n_mate1}.jsonl"
     if not p.exists():
         jsonl_write(p, build_mate1_fixtures(n_mate1, seed))
     written["mate1"] = str(p)
-    for name, rows in build_position_fixtures(n_per_bin, seed).items():
-        q = d / f"positions_{name}_{n_per_bin}.jsonl"
-        if not q.exists():
-            jsonl_write(q, rows)
-        written[f"positions_{name}"] = str(q)
     return written
 
 
