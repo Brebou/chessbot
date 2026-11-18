@@ -75,7 +75,7 @@ def classify_position(ann: dict) -> Optional[str]:
 def build_rows(games: List[str], positions_path: str, annotations_path: str,
                *, tb_rows_path: str = "",
                extra_rows_paths: Tuple[str, ...] = (), tb_adapter=None,
-               seed: int = 0) -> "tuple[List[dict], Counter]":
+               seed: int = 0, progress=None) -> "tuple[List[dict], Counter]":
     """Attach real histories to annotated positions, classify, dedup."""
     positions = list(jsonl_read(positions_path))
     anns = {r["fen"]: r for r in jsonl_read(annotations_path)}
@@ -86,6 +86,9 @@ def build_rows(games: List[str], positions_path: str, annotations_path: str,
     classified: List[dict] = []
     drop_stats: Counter = Counter()
     for gi, game in enumerate(games):
+        if progress is not None:
+            progress.show(f"building rows: games {gi}/{len(games)} | "
+                          f"{len(classified)} classified")
         gid = f"g{gi}"
         plies = {r["ply"]: r for r in by_game.get(gid, [])}
         if not plies:
@@ -235,7 +238,8 @@ def build_bucket_dataset(games: List[str], positions_path: str,
     rows, drop_stats = build_rows(games, positions_path, annotations_path,
                                   tb_rows_path=tb_rows_path,
                                   extra_rows_paths=extra_rows_paths,
-                                  tb_adapter=tb_adapter, seed=seed)
+                                  tb_adapter=tb_adapter, seed=seed,
+                                  progress=progress)
     if drop_stats:
         print(f"⚠️ dropped: {dict(drop_stats)}")
     rows = _apply_caps(rows, seed)
@@ -272,12 +276,14 @@ def main() -> None:
     if args.tb_dir:
         from ft.data.tablebase import SyzygyAdapter
         tb_adapter = SyzygyAdapter(args.tb_dir)
+    from diag.common import ProgressLine
     counts = build_bucket_dataset(games, args.positions, args.annotations,
                                   args.out, tb_rows_path=args.tb_rows,
                                   extra_rows_paths=tuple(args.extra_rows),
                                   tb_adapter=tb_adapter,
                                   target_total=args.target_total or None,
-                                  seed=args.seed, force=args.force)
+                                  seed=args.seed, force=args.force,
+                                  progress=ProgressLine())
     if tb_adapter is not None:
         tb_adapter.close()
     print(f"✅ mix: {sum(counts.values())} rows {counts}")
