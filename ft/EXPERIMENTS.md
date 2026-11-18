@@ -11,9 +11,9 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 |---|---|
 | Submission candidate | `base_model` (paired score 0.231) |
 | Fallback | `results/sft/run1/final` (0.210) |
-| Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified yet (18+ evals across 7 runs) |
-| Local suite | 126 passed / 7 skipped |
-| Current stage | Stage-2 DAgger (run3): on-policy collection from `base_model`, blended ≤15% into the iteration-1 mix |
+| Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified (8 post-training runs, ~30 evals) |
+| Local suite | 127 passed / 7 skipped |
+| Current stage | **Ladder terminal after run4 → final submission `base_model`; write-up pending** |
 
 ## How models are evaluated (3 instruments, all paired vs base)
 
@@ -35,6 +35,7 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | mix, hinge off (`--lambda-contrast 0`) (run2b) | 8.4–8.8% | 58.2–62.5% | ~−0.03 | −0.015…−0.054 | none |
 | mix_w2, hinge off (run2c / B2) | 10.0% sat. | 55.7–58.5% | −0.03…−0.048 | −0.031…−0.056 | none |
 | mix_it2 = mix + 5.8% DAgger rows, 18,049 on-policy states, engine-labeled (run3) | 8.4–9.2% | 59.0–59.5% (not recovered) | −0.042 → **−0.0156** (closest-to-zero of the campaign, ~1.1σ) | −0.039…−0.034 | none |
+| mix_it2b = mix + 15%-capped DAgger-2 (32,114 CE rows → normal + 20,827 on-policy contrastive pairs; 87,860 states, depth 10), from base (run4) | 7.4–9.6% | 56.5–59.0% (not recovered) | −0.033 → −0.048 (monotone decline; best eval −0.0297) | −0.030…−0.046 | none |
 
 Robust conclusions (946k params):
 - mate1 dose-responds to CE weight (4.8 → 10%) then saturates; the
@@ -44,6 +45,15 @@ Robust conclusions (946k params):
   correctly refuses everything; off-policy SFT is exhausted as an Elo lever.
 - Legality is banked in the base (98% global / 95% end on our fixtures),
   preserved under all runs; monitor via guards only, never optimize.
+- On-policy model-negative pairs are actively harmful at this capacity:
+  run4 vs run3 at the matched step-1152 eval is engine −0.0453 vs −0.0156,
+  and run4's balanced score declines monotonically with training while
+  `val_ce_contrastive` *improves* (3.66 → 3.30). The model fits its own
+  visited states' negatives readily, but CE-pulling toward off-manifold
+  SF-best at exactly the states its current policy produces outweighs the
+  hone signal on ~1M params.
+- The one robust real improvement of the campaign is mate-in-1 (4.8% →
+  7.4–10.2% across all variants); it never converts into engine score.
 
 ## Decision rules (pre-registered)
 
@@ -62,6 +72,12 @@ Robust conclusions (946k params):
   pairs + model-generated negatives from the same DAgger rollouts
   (“punish must also build”), (b) legal-masked CE, (c) soft targets from
   annotated `cp_second`. If none converts, submit `base_model`.
+- Ladder terminal (recorded after run4): (a) was already half-implemented
+  (CE-on-good ships in `ft_loss`); its new half, on-policy negatives,
+  made the engine trend strictly worse than run3. (b) declined: legality
+  is 97–100% top-1, no headroom. (c) declined: it reweights the same
+  off-policy CE signal that every run shows degrades engine play.
+  **Final submission: `base_model` (0.231).**
 
 - run4 pre-flight crash: `rollout_positions`/`dagger_collect` wrapped the
   `progress` object as `show` instead of its `.show` method (fast path
@@ -79,4 +95,4 @@ Robust conclusions (946k params):
 | ft/run2b (B1) | mix, no hinge | no change vs run1b |
 | ft/run2c (B2) | mix_w2, no hinge | mate1 10% sat., captures not recovered |
 | ft/run3 | DAgger from base (annotation pool) | 18,049 states collected+annotated (depth 10); 0 qualified; engine trend nearest zero of campaign; captures not recovered |
-| ft/run4 | mix_it2 + model-negative pair rows (--emit-pairs) | **pending** |
+| ft/run4 | mix_it2b (DAgger-2 15% cap: CE→normal + on-policy pairs), from base, 3 ep | 1,728 steps, 6 evals; balanced declines −0.033 → −0.047; engine best −0.0297; strictly worse than run3 at matched step-1152; no qualification → ladder terminal, submit `base_model` |
