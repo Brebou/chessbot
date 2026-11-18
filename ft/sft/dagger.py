@@ -51,6 +51,10 @@ def position_signature(fen: str) -> tuple:
             material_value(board, chess.WHITE) - material_value(board, chess.BLACK))
 
 
+def _noop(msg: str) -> None:
+    pass
+
+
 def load_elite_signatures(elite_positions_path: str) -> List[tuple]:
     if not elite_positions_path or not Path(elite_positions_path).exists():
         return []
@@ -73,8 +77,10 @@ def is_ood(sig: tuple, elite_index: set, tol: int = OOD_TOL) -> bool:
 
 def rollout_positions(model_path: str, n_episodes: int, *, stop_pieces: int = 16,
                       opening_plies: int = 8, seed: int = 0, device: Optional[str] = None,
-                      batch_size: int = 512, max_plies: int = 120) -> List[dict]:
+                      batch_size: int = 512, max_plies: int = 120,
+                      progress=None) -> List[dict]:
     """Greedy model self-play; returns {"fen", "history"} per visited state."""
+    show = progress if progress is not None else _noop
     tokenizer = ChessTokenizer()
     model = load_model(model_path, device=device)
     probe = FastProbePlayer(model, tokenizer, batch_size=batch_size)
@@ -89,9 +95,11 @@ def rollout_positions(model_path: str, n_episodes: int, *, stop_pieces: int = 16
         active.append({"board": board, "hist": hist,
                        "rng": random.Random(f"dagger-ep-{seed}-{e}")})
     rows: Dict[str, dict] = {}
-    for _ in range(max_plies):
+    for ply in range(max_plies):
         if not active:
             break
+        show(f"dagger rollouts: ply {ply}/{max_plies} | {len(active)} episodes "
+             f"live | {len(rows)} states")
         choices = probe.choose_from_histories([a["hist"] for a in active],
                                               [a["board"] for a in active])
         still = []
@@ -173,6 +181,7 @@ def dagger_collect(model_path: str, out: str, *, n_episodes: int = 400,
                    elite_positions_path: str = "",
                    annotate_fn: Optional[Callable] = None,
                    force: bool = False, progress=None) -> dict:
+    show = progress if progress is not None else _noop
     out_path = Path(out)
     if out_path.exists() and not force:
         rows = list(jsonl_read(out_path))
@@ -181,8 +190,12 @@ def dagger_collect(model_path: str, out: str, *, n_episodes: int = 400,
     positions = rollout_positions(model_path, n_episodes, stop_pieces=stop_pieces,
                                   opening_plies=opening_plies, seed=seed,
                                   device=device, batch_size=batch_size,
-                                  max_plies=max_plies)
+                                  max_plies=max_plies, progress=progress)
+    if elite_positions_path and Path(elite_positions_path).exists():
+        show("dagger: indexing elite corpus signatures (single-core, minutes)...")
     elite_index = set(load_elite_signatures(elite_positions_path))
+    show(f"dagger: OOD index ready ({len(elite_index)} elite signatures, "
+         f"{len(positions)} rollout states)")
     anns = _annotate(positions, engine_path=engine_path, depth=depth,
                      workers=workers, annotate_fn=annotate_fn, progress=progress)
     rows: List[dict] = []
@@ -275,13 +288,14 @@ def main() -> None:
         return
     if not args.model_path:
         parser.error("--model-path is required for collection mode")
+    from diag.common import ProgressLine
     dagger_collect(args.model_path, args.out, n_episodes=args.n_episodes,
                    stop_pieces=args.stop_pieces, opening_plies=args.opening_plies,
                    max_plies=args.max_plies, device=args.device,
                    batch_size=args.batch_size, engine_path=args.engine,
                    depth=args.depth, workers=args.workers,
                    elite_positions_path=args.elite_positions, seed=args.seed,
-                   force=args.force)
+                   force=args.force, progress=ProgressLine())
 
 
 if __name__ == "__main__":
