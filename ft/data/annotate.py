@@ -163,7 +163,6 @@ def annotate_task(task):
         board = chess.Board(fen)
         played = board.parse_uci(uci_played)
     except ValueError:
-        annotator.stockfish.close()
         return {"fen": fen, "uci_played": uci_played, "invalid": True}
     block = annotator.annotate(fen)
     played_uci = played.uci()
@@ -176,7 +175,6 @@ def annotate_task(task):
         after.push(played)
         block["cp_played_after"] = -score_to_mover(
             annotator.stockfish.engine.analyse(after, _ce.Limit(depth=depth))["score"])
-    annotator.stockfish.close()
     row = {"fen": fen, "uci_played": uci_played,
            "cp_root": block["cp_best"], **block,
            "is_check_before": chess.Board(fen).is_check()}
