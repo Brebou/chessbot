@@ -219,6 +219,37 @@ def test_dagger_cached_output(tiny_model, tmp_path):
     assert again["n_rows"] == 2 and again["n_ood"] == 2
 
 
+def test_is_ood_index_matches_neighborhood():
+    from ft.sft.dagger import is_ood
+    assert is_ood((30, 0), set()) is True
+    elite = {(30, 0), (32, -2)}
+    assert is_ood((31, 1), elite) is False
+    assert is_ood((29, -1), elite) is False
+    assert is_ood((30, 2), elite) is True
+    assert is_ood((34, -2), elite) is True
+
+
+def test_build_iteration2_mix_folds_and_relabels(tmp_path):
+    from ft.sft.dagger import build_iteration2_mix
+    base = tmp_path / "mix.jsonl"
+    with open(base, "w") as f:
+        for i in range(100):
+            f.write(json.dumps({"bucket": "normal", "id": i}) + "\n")
+    dagger = tmp_path / "dagger.jsonl"
+    with open(dagger, "w") as f:
+        for i in range(40):
+            f.write(json.dumps({"bucket": "dagger", "key": f"fen{i}",
+                                "ood": i < 10}) + "\n")
+    out = tmp_path / "mix_it2.jsonl"
+    build_iteration2_mix(str(base), str(dagger), str(out), max_share=0.15)
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert len(rows) == 117
+    folded = [r for r in rows if r.get("folded") or "key" in r]
+    assert len(folded) == 17
+    assert all(r["bucket"] == "normal" for r in folded)
+    assert all(r["ood"] for r in folded[:10])
+
+
 def test_blend_dagger_share_cap():
     rows = [{"bucket": "normal", "id": i} for i in range(100)]
     dagger = [{"bucket": "dagger", "ood": False} for _ in range(40)]
