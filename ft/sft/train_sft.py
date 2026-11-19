@@ -212,6 +212,10 @@ class FTSFTTrainer:
         return [json.loads(line) for line in
                 self.metrics_path.read_text().splitlines() if line.strip()]
 
+    def metric_rows(self) -> List[dict]:
+        """Public accessor: all eval rows logged by this trainer."""
+        return self._metric_rows()
+
     def _prune_checkpoints(self) -> None:
         """Keep only the best-`max_checkpoints` dirs by balanced delta."""
         cfg = self.cfg

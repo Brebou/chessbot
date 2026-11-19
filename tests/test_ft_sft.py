@@ -557,6 +557,16 @@ def test_poc_loop_single_iteration_smoke(tiny_model, tmp_path):
     final = summary[0].get("final_model")
     assert final and Path(final).exists()
 
+    poc_dir = tmp_path / "poc"
+    metrics_lines = [json.loads(l) for l in
+                     (poc_dir / "metrics.jsonl").read_text().splitlines() if l.strip()]
+    assert metrics_lines and all("iteration" in row for row in metrics_lines)
+    summary_lines = [json.loads(l) for l in
+                     (poc_dir / "summary.jsonl").read_text().splitlines() if l.strip()]
+    assert len(summary_lines) == 1
+    assert summary_lines[0]["iteration"] == 1
+    assert summary_lines[0]["corrections"] == summary[0]["corrections"]
+
 
 def test_rollout_and_collect_accept_progress_show_object(tiny_model, tmp_path):
     class StubProgress:
