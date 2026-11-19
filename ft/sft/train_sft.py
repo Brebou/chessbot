@@ -276,6 +276,10 @@ class FTSFTTrainer:
             row["engine_delta"] = paired["delta"]
             row["engine_sigma"] = paired["sigma"]
             row["engine_per_level_delta"] = paired["per_level_delta"]
+            row["engine_cand_score"] = paired["cand_score"]
+            row["engine_base_score"] = paired["base_score"]
+            row["engine_per_level_cand"] = paired["per_level_cand"]
+            row["engine_per_level_base"] = paired["per_level_base"]
             row["proxy_delta"] = proxy["proxy_delta"]
             row["balanced"] = balanced_delta(paired, proxy)
             row["significant"] = row["balanced"] - 2 * paired["sigma"] > 0
@@ -285,6 +289,41 @@ class FTSFTTrainer:
                 self._base_fixtures = self._base_fixture_metrics()
             row["fixtures"] = cand_fixtures
         return row
+
+    def _eval_detail_lines(self, row: dict) -> List[str]:
+        lines: List[str] = []
+        pl = row.get("engine_per_level_delta") or {}
+        if pl:
+            delta_txt = "  ".join(
+                f"L{lv} {pl[lv]:+.4f}" for lv in sorted(pl, key=int))
+            lines.append(f"  delta/level: {delta_txt}")
+        cs = row.get("engine_per_level_cand") or {}
+        bs = row.get("engine_per_level_base") or {}
+        official = [lv for lv in ("1", "2", "3") if lv in cs and lv in bs]
+        if official:
+            cand = sum(cs[lv] for lv in official) / len(official)
+            base = sum(bs[lv] for lv in official) / len(official)
+            lines.append(f"  official (S1+S2+S3)/3: cand={cand:.4f} "
+                         f"base={base:.4f} delta={cand - base:+.4f}")
+        if row.get("engine_sigma") is not None:
+            lines.append(f"  engine sigma={row['engine_sigma']:.4f} "
+                         f"qualifies (delta - 2*sigma > 0): "
+                         f"{row.get('significant')}")
+        fx = row.get("fixtures")
+        if fx:
+            lines.append(
+                "  fixtures: mate1={:.1%} | won-cap end/late={:.1%}/{:.1%} | "
+                "lost-cap end/late={:.1%}/{:.1%} | legal end/mid/late="
+                "{:.0%}/{:.0%}/{:.0%}".format(
+                    fx.get("mate1_top1_rate", 0.0),
+                    fx.get("winning_capture_rate_end", 0.0),
+                    fx.get("winning_capture_rate_late", 0.0),
+                    fx.get("losing_capture_rate_end", 0.0),
+                    fx.get("losing_capture_rate_late", 0.0),
+                    fx.get("top1_legal_end", 0.0),
+                    fx.get("top1_legal_mid", 0.0),
+                    fx.get("top1_legal_late", 0.0)))
+        return lines
 
     # -- training ------------------------------------------------------------
 
@@ -381,7 +420,9 @@ class FTSFTTrainer:
         if balanced is not None:
             print(f"\neval [{row['eval_tag']}]: balanced={balanced:.4f} "
                   f"(engine {row['engine_delta']:.4f} / proxy "
-                  f"{row['proxy_delta']:.4f})", flush=True)
+                  f"{row['proxy_delta']:.4f})")
+            for line in self._eval_detail_lines(row):
+                print(line, flush=True)
         else:
             print(f"\neval [{row['eval_tag']}]: no paired eval "
                   f"(eval_mode={cfg.eval_mode})", flush=True)

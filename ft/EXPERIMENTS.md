@@ -12,8 +12,8 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | Submission candidate | `base_model` (paired score 0.231) |
 | Fallback | `results/sft/run1/final` (0.210) |
 | Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified (8 post-training runs, ~30 evals) |
-| Local suite | 131 passed / 7 skipped |
-| Current stage | run5 (extend run3's DAgger mix) + run6 (KL-anchored on-policy correction PoC) pre-registered; `base_model` remains submission until one qualifies |
+| Local suite | 134 passed / 7 skipped |
+| Current stage | run5 + run6 + run7 (toy continuous loop) pre-registered; `base_model` remains submission until one qualifies |
 
 ## How models are evaluated (3 instruments, all paired vs base)
 
@@ -92,6 +92,21 @@ Robust conclusions (946k params):
   first checkpoint with `balanced − 2σ > 0`, or a sustained trend with
   captures-late held ≥ 62%. Kill: KL fails to hold both by epoch 4 of a
   381-step/epoch schedule.
+- Pre-registered **run7** (clean-room toy loop, `ft/sft/poc_loop.py`): no
+  reuse of dagger2 or any collected data. Each iteration plays ~500 fresh
+  full self-play games with the current policy (`stop_pieces=0`, openings
+  8 plies, 250-ply cap), scores every visited state's played move at depth
+  6 (multipv 5, before/after mover-POV), and keeps corrections only for
+  the three failure classes: eval loss > 150 cp, missed mate in ≤ 2,
+  ≤10-piece failure to convert a forced mate within +1 ply of the fastest
+  (KRK-style multi-solution mates emit one row per equally-fast mating
+  alternative, weight 1/n). Micro fine-tune on corrections only, lr 5e-5,
+  forward-KL anchor λ 0.1 to frozen `base_model`; corrections discarded,
+  fresh games resampled with a new seed each iteration. Pass: the loop's
+  paired balance-vs-base becomes non-negative across iterations (or
+  corrections/iteration shrinks); Kill: captures-late regresses below
+  55% or balanced is still ≤ −0.05 at iteration 4. Iteration estimate:
+  10–20 min on 22 workers.
 - Ladder rungs (b) legal-masked CE and (c) soft-target `cp_second` remain
   declined: (b) legality is 97–100% top-1, no headroom; (c) reweights the
   same off-policy CE signal every run shows degrades engine play.
@@ -116,3 +131,4 @@ Robust conclusions (946k params):
 | ft/run4 | mix_it2b (DAgger-2 15% cap: CE→normal + on-policy pairs), from base, 3 ep | 1,728 steps, 6 evals; balanced declines −0.033 → −0.047; engine best −0.0297; ~1–2σ below run3 at matched step-1152; no qualification |
 | ft/run5 | mix_it2, from base, 5 ep (pre-registered) | **pending** |
 | ft/run6 | poc corrections-only + KL anchor (λ 0.1, lr 5e-5) | **pending** |
+| poc/run7 | clean-room continuous loop (fresh games, corrections, KL) | **pending** |
