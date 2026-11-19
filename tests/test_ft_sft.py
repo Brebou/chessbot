@@ -24,6 +24,7 @@ from ft.sft.dataset import (BUCKET_RATIOS_TRAIN, game_partition_key,
 from ft.sft.dagger import (blend_dagger, build_poc_mix, classify_model_move,
                            dagger_collect, rollout_positions)
 from ft.sft.losses import PAIR_CAP, anchor_kl, contrastive_loss, ft_loss
+from ft.sft.poc_loop import build_corrections, poc_classify, run_poc_loop
 from ft.sft.train_sft import (FTSFTConfig, FTSFTTrainer, ce_regressed,
                               legality_aborted)
 
@@ -457,6 +458,76 @@ def test_build_poc_mix_keeps_only_blunder_corrections(tmp_path):
     assert rows[0]["key"] == "FEN_A"
     assert rows[0]["bucket"] == "normal" and rows[0]["target"] == "e4d5"
     assert stats["n_within_baseline"] == 1 and stats["n_scored"] == 2
+
+
+def test_poc_classify_rules():
+    assert poc_classify(0, -300, None, None, 30)
+    assert not poc_classify(0, -100, None, None, 30)
+    assert poc_classify(None, -9950, None, -4, 30)
+    assert poc_classify(None, None, 1, None, 40)
+    assert poc_classify(None, None, 1, 2, 40)
+    assert poc_classify(None, None, 5, 8, 8)
+    assert not poc_classify(None, None, 5, 6, 8)
+    assert not poc_classify(None, None, 5, 6, 40)
+    assert not poc_classify(None, None, 2, 2, 30)
+    assert not poc_classify(None, None, None, None, 30)
+
+
+def test_build_corrections_rows(tmp_path):
+    states = [
+        {"fen": "FEN_A", "history": ["e2e4"], "model_move": "a2a3"},
+        {"fen": "FEN_B", "history": ["d2d4"], "model_move": "b1c3"},
+        {"fen": "FEN_C", "history": ["c2c4"], "model_move": "g1f3"},
+    ]
+    scores = {
+        "FEN_A": {"fen": "FEN_A", "cp_best": 0, "cp_model": -300,
+                  "mate_best": None, "mate_model": None,
+                  "best_uci": "d1h5", "alt_mates": []},
+        "FEN_B": {"fen": "FEN_B", "cp_best": 9000, "cp_model": 300,
+                  "mate_best": 6, "mate_model": None,
+                  "best_uci": "a1a8", "alt_mates": ["a1a8", "a1a7"]},
+        "FEN_C": {"fen": "FEN_C", "cp_best": 0, "cp_model": 0,
+                  "mate_best": None, "mate_model": None,
+                  "best_uci": "g1f3", "alt_mates": []},
+    }
+    rows = build_corrections(states, scores, cp_threshold=150.0,
+                             mate_piece_gate=10, quick_mate_plies=2,
+                             mate_slack_plies=1)
+    assert [r["key"] for r in rows] == ["FEN_A", "FEN_B", "FEN_B"]
+    assert rows[0]["target"] == "d1h5" and rows[0]["weight"] == 1.0
+    assert rows[0]["bucket"] == "normal"
+    alt_rows = [r for r in rows if r["key"] == "FEN_B"]
+    assert sorted(r["target"] for r in alt_rows) == ["a1a7", "a1a8"]
+    assert all(r["weight"] == 0.5 for r in alt_rows)
+
+
+def test_poc_loop_single_iteration_smoke(tiny_model, tmp_path):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        model_path=str(tiny_model / "model.safetensors"),
+        out_dir=str(tmp_path / "poc"), iterations=1, games=1, epochs=1,
+        batch_size=8, lr=5e-5, kl_lambda=0.1, seed=0, device="cpu",
+        engine="stockfish", depth=6, workers=1, cp_threshold=150.0,
+        mate_piece_gate=10, quick_mate_plies=2, mate_slack_plies=1,
+        eval_workers=1, eval_mode="none", eval_levels=(0,), patience=3,
+        fixtures_dir="", fixtures_games="")
+    seen: dict = {}
+
+    def score_fn(fen, model_move):
+        seen[fen] = True
+        if len(seen) == 1:
+            return {"fen": fen, "cp_best": 0, "cp_model": -300,
+                    "mate_best": None, "mate_model": None,
+                    "best_uci": "e2e4", "alt_mates": []}
+        return {"fen": fen, "cp_best": 0, "cp_model": 0,
+                "mate_best": None, "mate_model": None,
+                "best_uci": model_move, "alt_mates": []}
+
+    summary = run_poc_loop(args, score_fn=score_fn)
+    assert summary[0]["corrections"] >= 1
+    final = summary[0].get("final_model")
+    assert final and Path(final).exists()
 
 
 def test_rollout_and_collect_accept_progress_show_object(tiny_model, tmp_path):
