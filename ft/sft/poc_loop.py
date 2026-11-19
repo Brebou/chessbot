@@ -2,8 +2,11 @@
 
 Nothing is reused from previous collections or mixes. Each iteration:
 
-1. plays fresh full self-play games with the current policy (openings from
-   `chess_hw.match`, greedy probe moves, seeded random fallback);
+1. plays fresh full games with the current policy: by default 1/3 pure
+   self-play and 2/3 vs the FastEngine class-engine lookalike (half with
+   the model as white), engine level sampled per game (L1 10%, L2 30%,
+   L3 60%); openings from `chess_hw.match`, official greedy decode with
+   seeded random fallback;
 2. scores every visited state's played move at a LOW engine depth:
    analysis before, push the model move, analysis after (both mover-POV);
 3. keeps correction rows only for the three explicit failure classes —
@@ -38,6 +41,7 @@ import argparse
 import gc
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -47,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import chess
 
+from chess_hw.play import MoveChoice
 from diag.common import ProgressLine
 from ft.common.board_io import n_pieces_from_fen
 from ft.common.serialize import jsonl_write
@@ -186,6 +191,94 @@ def _gpu_memory_line(device: str) -> str:
     return out + f" -> reserved now {torch.cuda.memory_reserved() / 2**20:.0f} MiB"
 
 
+class _FastEngineOpponent:
+    """FastEngine behind the official Player interface (persistent per worker)."""
+
+    def __init__(self, level: int, seed: str):
+        from diag.fast_engine import FastEngine
+
+        self.name = f"engine-L{level}"
+        self.engine = FastEngine(level=level, seed=seed)
+
+    def choose(self, board: chess.Board) -> MoveChoice:
+        return MoveChoice(self.engine.best_move(board), 1)
+
+
+def allocate_level_counts(n: int, probs: List[float]) -> List[int]:
+    if abs(sum(probs) - 1.0) > 1e-6:
+        raise ValueError(f"level probabilities must sum to 1, got {probs}")
+    counts = [int(round(p * n)) for p in probs]
+    counts[probs.index(max(probs))] += n - sum(counts)
+    return counts
+
+
+def _mix_engine_game_task(task):
+    """Spawn worker: (oid, model_white, level, opening_plies, max_plies, seed).
+
+    Plays one full game model-vs-FastEngine with official inference semantics
+    (ModelPlayer: first->second->third legal, seeded random fallback) and
+    returns the model's decision states: {fen, history, model_move} per
+    model turn."""
+    from chess_hw.match import _get_player, load_openings, play_game
+
+    oid, model_white, level, opening_plies, max_plies, seed = task
+    model = _get_player("m")
+    side = "w" if model_white else "b"
+    engine = _FastEngineOpponent(
+        level, seed=f"mix-{seed}-{level}-{oid}-{side}")
+    opening = load_openings()[oid]
+    white, black = (model, engine) if model_white else (engine, model)
+    rec = play_game(white, black, opening, oid, max_plies=max_plies)
+    moves = rec.moves
+    board = chess.Board()
+    states = []
+    for i, uci in enumerate(moves):
+        if ((i % 2 == 0) == model_white) and uci:
+            states.append({"fen": board.fen(), "history": moves[:i],
+                           "model_move": uci})
+        board.push_uci(uci)
+    return states
+
+
+def engine_opponent_states(model_path: str, n_games: int, *, opening_plies: int,
+                           seed: str, engine_levels: List[int],
+                           level_probs: List[float], workers: int,
+                           max_plies: int,
+                           game_fn: Optional[Callable] = None,
+                           progress=None) -> List[dict]:
+    """Model-vs-FastEngine games (half model-white, half model-black),
+    level sampled per game from engine_levels with level_probs; returns the
+    model's decision states in the rollout row format."""
+    show = (progress.show if progress is not None
+            else (lambda msg, force=False: None))
+    if n_games <= 0:
+        return []
+    from chess_hw.match import load_openings
+
+    show(f"poc rollouts: playing {n_games} engine-opponent games...")
+    n_openings = len(load_openings())
+    rng = random.Random(f"opp-mix-{seed}")
+    levels_seq: List[int] = []
+    for level, count in zip(engine_levels,
+                            allocate_level_counts(n_games, level_probs)):
+        levels_seq += [level] * count
+    rng.shuffle(levels_seq)
+    tasks = [(rng.randrange(n_openings), g % 2 == 0, level, opening_plies,
+              max_plies, seed)
+             for g, level in enumerate(levels_seq)]
+    if game_fn is not None:
+        results = [game_fn(t) for t in tasks]
+    else:
+        from chess_hw.match import run_tasks
+
+        results = run_tasks(_mix_engine_game_task, tasks,
+                            {"m": str(model_path)}, workers, progress=False)
+    states = [s for record in results for s in record]
+    show(f"poc rollouts: {len(states)} model states from {n_games} "
+         f"engine-opponent games", force=True)
+    return states
+
+
 def poc_classify(cp_best: Optional[int], cp_model: Optional[int],
                  mate_best: Optional[int], mate_model: Optional[int],
                  n_pieces: int, *, cp_threshold: float = CP_BLUNDER_THRESHOLD,
@@ -246,6 +339,7 @@ def build_corrections(states: List[dict], scores: Dict[str, dict], *,
 
 
 def run_poc_loop(args, score_fn: Optional[Callable] = None,
+                 game_fn: Optional[Callable] = None,
                  progress=None) -> List[dict]:
     show = progress.show if progress is not None else (lambda msg: None)
     out_dir = Path(args.out_dir)
@@ -279,11 +373,24 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                        or (args.iterations > 0 and it == args.iterations))
             show(f"poc iter {it}: playing {args.games} games...")
             t0 = time.monotonic()
-            states = rollout_positions(policy_path, args.games, stop_pieces=0,
-                                       opening_plies=8, seed=args.seed * 1000 + it,
-                                       device=args.device,
-                                       batch_size=args.batch_size,
-                                       max_plies=MAX_POC_PLIES, progress=progress)
+            n_engine = int(round(args.games * getattr(args, "engine_share", 0.0)))
+            n_self = max(args.games - n_engine, 0)
+            states = []
+            if n_self > 0:
+                states += rollout_positions(policy_path, n_self, stop_pieces=0,
+                                            opening_plies=8, seed=args.seed * 1000 + it,
+                                            device=args.device,
+                                            batch_size=args.batch_size,
+                                            max_plies=MAX_POC_PLIES, progress=progress)
+            if n_engine > 0:
+                states += engine_opponent_states(
+                    policy_path, n_engine, opening_plies=8,
+                    seed=f"{args.seed}-{it}",
+                    engine_levels=list(getattr(args, "opp_levels", [1, 2, 3])),
+                    level_probs=list(getattr(args, "opp_level_probs",
+                                             [0.1, 0.3, 0.6])),
+                    workers=args.workers, max_plies=MAX_POC_PLIES,
+                    game_fn=game_fn, progress=progress)
             t1 = time.monotonic()
             tasks = [(s["fen"], s["model_move"]) for s in states]
             scores = poc_score(tasks, engine_path=args.engine, depth=args.depth,
@@ -375,7 +482,18 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=6,
                         help="number of iterations; 0 = run until Ctrl-C")
     parser.add_argument("--games", type=int, default=500,
-                        help="fresh self-play games per iteration")
+                        help="fresh games per iteration (self-play plus "
+                             "engine-opponent mix)")
+    parser.add_argument("--engine-share", type=float, default=0.66,
+                        help="share of games vs the FastEngine opponent "
+                             "(split half model-white, half model-black); "
+                             "the rest is full self-play. 0.66 = 1/3 "
+                             "self-play, 2/3 vs engine")
+    parser.add_argument("--opp-levels", type=int, nargs="+", default=[1, 2, 3],
+                        help="FastEngine levels sampled as opponents")
+    parser.add_argument("--opp-level-probs", type=float, nargs="+",
+                        default=[0.1, 0.3, 0.6],
+                        help="sampling probabilities for --opp-levels")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=5e-5)
