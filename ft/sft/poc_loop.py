@@ -23,6 +23,7 @@ The point is fast feedback on whether ANY post-training update to this
 from __future__ import annotations
 
 import argparse
+import gc
 import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -124,6 +125,21 @@ def poc_score(tasks: List[tuple], *, engine_path: str, depth: int,
     return out
 
 
+def _gpu_memory_line(device: str) -> str:
+    """Allocated/reserved/peak MiB line; '' when not on CUDA."""
+    import torch
+
+    if not (str(device).startswith("cuda") and torch.cuda.is_available()):
+        return ""
+    gc.collect()
+    out = (f"gpu: allocated {torch.cuda.memory_allocated() / 2**20:.0f} MiB | "
+           f"reserved {torch.cuda.memory_reserved() / 2**20:.0f} MiB | "
+           f"peak {torch.cuda.max_memory_allocated() / 2**20:.0f} MiB")
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    return out + f" -> reserved now {torch.cuda.memory_reserved() / 2**20:.0f} MiB"
+
+
 def poc_classify(cp_best: Optional[int], cp_model: Optional[int],
                  mate_best: Optional[int], mate_model: Optional[int],
                  n_pieces: int, *, cp_threshold: float = CP_BLUNDER_THRESHOLD,
@@ -194,9 +210,13 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
     policy_export.mkdir(parents=True, exist_ok=True)
     summary: List[dict] = []
     it = 0
+    records_cache: Dict[str, list] = {}
+    eval_every = max(1, getattr(args, "eval_every_iterations", 1))
     try:
         while args.iterations <= 0 or it < args.iterations:
             it += 1
+            do_eval = (it % eval_every == 0
+                       or (args.iterations > 0 and it == args.iterations))
             show(f"poc iter {it}: playing {args.games} games...")
             states = rollout_positions(policy_path, args.games, stop_pieces=0,
                                        opening_plies=8, seed=args.seed * 1000 + it,
@@ -227,13 +247,17 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                 mix_path=str(mix_path), out_dir=str(out_dir / f"iter{it}"),
                 device=args.device, seed=args.seed + it, epochs=args.epochs,
                 batch_size=args.batch_size, lr=args.lr,
-                kl_lambda=args.kl_lambda, eval_mode=args.eval_mode,
+                kl_lambda=args.kl_lambda,
+                eval_mode=args.eval_mode if do_eval else "none",
                 eval_every_steps=0, eval_levels=tuple(args.eval_levels),
                 eval_workers=args.eval_workers,
+                eval_n_openings=getattr(args, "eval_openings", 40),
+                selfplay_games=getattr(args, "selfplay_games", 200),
                 plateau_patience=args.patience,
                 fixtures_dir=args.fixtures_dir,
                 fixtures_games=args.fixtures_games)
             trainer = FTSFTTrainer(cfg)
+            trainer._records_cache = records_cache
             done = trainer.train()
             done["iteration"] = it
             done["corrections"] = len(corrections)
@@ -241,6 +265,9 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
             final = done.get("final_model")
             if final:
                 policy_path = final
+            gpu = _gpu_memory_line(args.device)
+            if gpu:
+                print(f"  {gpu}", flush=True)
     except KeyboardInterrupt:
         print(f"\n⏹️ poc loop interrupted after {len(summary)} completed "
               f"iterations; last policy: {policy_path}", flush=True)
@@ -276,6 +303,12 @@ def main() -> None:
                         default=MATE_SLACK_PLIES)
     parser.add_argument("--eval-workers", type=int, default=16)
     parser.add_argument("--eval-mode", default="paired")
+    parser.add_argument("--eval-every-iterations", type=int, default=1,
+                        help="paired qualification eval every N iterations")
+    parser.add_argument("--eval-openings", type=int, default=40,
+                        help="openings per level/color in paired engine eval")
+    parser.add_argument("--selfplay-games", type=int, default=200,
+                        help="head-to-head games in the paired proxy eval")
     parser.add_argument("--eval-levels", type=int, nargs="+",
                         default=[0, 1, 2, 3])
     parser.add_argument("--patience", type=int, default=3)
