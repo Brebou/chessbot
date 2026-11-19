@@ -338,6 +338,13 @@ def build_corrections(states: List[dict], scores: Dict[str, dict], *,
     return rows
 
 
+def _use_fixtures(args, it: int, n_completed: int) -> bool:
+    if not getattr(args, "fixtures_dir", ""):
+        return False
+    return (n_completed == 0
+            or it % getattr(args, "fixtures_every", 1) == 0)
+
+
 def run_poc_loop(args, score_fn: Optional[Callable] = None,
                  game_fn: Optional[Callable] = None,
                  progress=None) -> List[dict]:
@@ -376,13 +383,16 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
             n_engine = int(round(args.games * getattr(args, "engine_share", 0.0)))
             n_self = max(args.games - n_engine, 0)
             states = []
+            t_self = t_engine = 0.0
             if n_self > 0:
                 states += rollout_positions(policy_path, n_self, stop_pieces=0,
                                             opening_plies=8, seed=args.seed * 1000 + it,
                                             device=args.device,
                                             batch_size=args.batch_size,
                                             max_plies=MAX_POC_PLIES, progress=progress)
+                t_self = time.monotonic() - t0
             if n_engine > 0:
+                t_eng0 = time.monotonic()
                 states += engine_opponent_states(
                     policy_path, n_engine, opening_plies=8,
                     seed=f"{args.seed}-{it}",
@@ -391,6 +401,7 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                                              [0.1, 0.3, 0.6])),
                     workers=args.workers, max_plies=MAX_POC_PLIES,
                     game_fn=game_fn, progress=progress)
+                t_engine = time.monotonic() - t_eng0
             t1 = time.monotonic()
             tasks = [(s["fen"], s["model_move"]) for s in states]
             scores = poc_score(tasks, engine_path=args.engine, depth=args.depth,
@@ -431,7 +442,7 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                 eval_n_openings=getattr(args, "eval_openings", 40),
                 selfplay_games=getattr(args, "selfplay_games", 200),
                 plateau_patience=args.patience,
-                fixtures_dir=args.fixtures_dir,
+                fixtures_dir=args.fixtures_dir if _use_fixtures(args, it, len(summary)) else "",
                 fixtures_games=args.fixtures_games)
             trainer = FTSFTTrainer(cfg)
             trainer._records_cache = records_cache
@@ -456,9 +467,9 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                 for row in trainer.metric_rows():
                     row["iteration"] = it
                     f.write(json.dumps(row, sort_keys=True) + "\n")
-            print(f"\u23f1\ufe0f poc iter {it}: selfplay {t1 - t0:.0f}s | "
-                  f"scoring {t2 - t1:.0f}s | train+eval {done_s - t2:.0f}s | "
-                  f"total {done_s - t0:.0f}s", flush=True)
+            print(f"\u23f1\ufe0f poc iter {it}: selfplay {t_self:.0f}s | "
+                  f"engine-games {t_engine:.0f}s | scoring {t2 - t1:.0f}s | "
+                  f"train+eval {done_s - t2:.0f}s | total {done_s - t0:.0f}s", flush=True)
             if gpu:
                 print(f"  {gpu}", flush=True)
     except KeyboardInterrupt:
@@ -529,6 +540,11 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--fixtures-dir", default="")
     parser.add_argument("--fixtures-games", default="")
+    parser.add_argument("--fixtures-every", type=int, default=1,
+                        help="run fixture diagnostics every N iterations "
+                             "(always on the first iteration); 1 = every "
+                             "iteration. Diagnostics only — does not affect "
+                             "qualification")
     args = parser.parse_args()
     from diag.common import ProgressLine
     run_poc_loop(args, progress=ProgressLine())
