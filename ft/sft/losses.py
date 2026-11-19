@@ -36,6 +36,16 @@ def weighted_ce(logp: torch.Tensor, targets: torch.Tensor,
     return (weights * ce).sum() / weights.sum().clamp(min=1e-8)
 
 
+def anchor_kl(logp: torch.Tensor, ref_logp: torch.Tensor) -> torch.Tensor:
+    """Forward KL(base || policy) at the last position, corpus-independent:
+    base's next-move distribution (frozen reference) protects its mass even
+    where no training row exists. Adding the constant base entropy term has
+    no gradient effect, so this reduces to cross-entropy of the policy
+    under the base distribution."""
+    ref_p = ref_logp.exp()
+    return (ref_p * (ref_logp - logp)).sum(-1).mean()
+
+
 def contrastive_loss(logp: torch.Tensor, good: torch.Tensor, bad: torch.Tensor,
                      beta: float = BETA, cap: float = PAIR_CAP) -> torch.Tensor:
     d = logp.gather(1, good.unsqueeze(1))[:, 0] - logp.gather(1, bad.unsqueeze(1))[:, 0]
@@ -48,6 +58,7 @@ def ft_loss(model, batch_ids: torch.Tensor, lengths: torch.Tensor,
             good: Optional[torch.Tensor] = None, bad: Optional[torch.Tensor] = None,
             bad_mask: Optional[torch.Tensor] = None,
             beta: float = BETA, lambda_contrast: float = LAMBDA,
+            ref_model=None, lambda_kl: float = 0.0,
             ) -> Tuple[torch.Tensor, dict]:
     logp = last_logprobs(model, batch_ids, lengths)
     ce = weighted_ce(logp, ce_targets, ce_weights)
@@ -57,4 +68,10 @@ def ft_loss(model, batch_ids: torch.Tensor, lengths: torch.Tensor,
         contra = contrastive_loss(logp[bad_mask], good[bad_mask], bad[bad_mask], beta)
         parts["contrastive"] = contra.item()
         loss = loss + lambda_contrast * contra
+    if ref_model is not None and lambda_kl > 0:
+        with torch.no_grad():
+            ref_logp = last_logprobs(ref_model, batch_ids, lengths)
+        kl = anchor_kl(logp, ref_logp)
+        parts["kl"] = kl.item()
+        loss = loss + lambda_kl * kl
     return loss, parts

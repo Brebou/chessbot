@@ -92,6 +92,7 @@ class FTSFTConfig:
     grad_clip: float = 1.0
     lambda_contrast: float = LAMBDA
     beta: float = BETA
+    kl_lambda: float = 0.0
     log_every: int = 20
     rollback_lr: float = 5e-5          # lr after a `normal`-bucket CE regression
     # paired evaluation
@@ -155,6 +156,13 @@ class FTSFTTrainer:
 
         self.tokenizer = ChessTokenizer()
         self.model = load_model(cfg.model_path, device=self.device)
+        self.ref_model = None
+        if cfg.kl_lambda > 0:
+            ref_path = cfg.base_path or cfg.model_path
+            self.ref_model = load_model(ref_path, device=self.device)
+            self.ref_model.eval()
+            for p in self.ref_model.parameters():
+                p.requires_grad_(False)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=cfg.lr,
                                            weight_decay=cfg.weight_decay)
         if not Path(cfg.mix_path).exists():
@@ -293,7 +301,9 @@ class FTSFTTrainer:
                     batch, self.tokenizer, self.device)
                 loss, parts = ft_loss(self.model, ids, lengths, targets, weights,
                                       good, bad, bad_mask, beta=cfg.beta,
-                                      lambda_contrast=cfg.lambda_contrast)
+                                      lambda_contrast=cfg.lambda_contrast,
+                                      ref_model=self.ref_model,
+                                      lambda_kl=cfg.kl_lambda)
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
@@ -301,7 +311,8 @@ class FTSFTTrainer:
                 step += 1
                 if step % cfg.log_every == 0:
                     print(f"\repoch {epoch} step {step}: ce={parts['ce']:.4f} "
-                          f"contra={parts.get('contrastive', 0.0):.4f}",
+                          f"contra={parts.get('contrastive', 0.0):.4f} "
+                          f"kl={parts.get('kl', 0.0):.4f}",
                           end="", flush=True)
                 if cfg.eval_every_steps > 0 and step % cfg.eval_every_steps == 0:
                     row = {"step": step, "epoch": epoch,
