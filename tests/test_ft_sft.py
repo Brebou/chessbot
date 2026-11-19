@@ -507,6 +507,18 @@ def test_build_corrections_rows(tmp_path):
     assert all(r["weight"] == 0.5 for r in alt_rows)
 
 
+def test_gpu_memory_line_noop_on_cpu():
+    from ft.sft.poc_loop import _gpu_memory_line
+
+    assert _gpu_memory_line("cpu") == ""
+
+
+def test_gpu_memory_line_noop_on_cpu():
+    from ft.sft.poc_loop import _gpu_memory_line
+
+    assert _gpu_memory_line("cpu") == ""
+
+
 def test_poc_loop_single_iteration_smoke(tiny_model, tmp_path):
     from types import SimpleNamespace
 
