@@ -193,48 +193,57 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
     policy_export = out_dir / "policy"
     policy_export.mkdir(parents=True, exist_ok=True)
     summary: List[dict] = []
-    for it in range(1, args.iterations + 1):
-        show(f"poc iter {it}/{args.iterations}: playing {args.games} games...")
-        states = rollout_positions(policy_path, args.games, stop_pieces=0,
-                                   opening_plies=8, seed=args.seed * 1000 + it,
-                                   device=args.device,
-                                   batch_size=args.batch_size,
-                                   max_plies=MAX_POC_PLIES, progress=progress)
-        tasks = [(s["fen"], s["model_move"]) for s in states]
-        scores = poc_score(tasks, engine_path=args.engine, depth=args.depth,
-                           workers=args.workers, score_fn=score_fn,
-                           progress=progress)
-        corrections = build_corrections(
-            states, scores, cp_threshold=args.cp_threshold,
-            mate_piece_gate=args.mate_piece_gate,
-            quick_mate_plies=args.quick_mate_plies,
-            mate_slack_plies=args.mate_slack_plies)
-        mix_path = out_dir / f"mix_iter{it}.jsonl"
-        jsonl_write(mix_path, corrections)
-        n_failed = sum(1 for t in tasks if scores.get(t[0], {}).get("best_uci") is None)
-        print(f"✅ poc iter {it}: {len(states)} states, "
-              f"{len(corrections)} correction rows "
-              f"({n_failed} scored failed)", flush=True)
-        if not corrections:
-            summary.append({"iteration": it, "corrections": 0})
-            continue
-        cfg = FTSFTConfig(
-            model_path=policy_path, base_path=base_path,
-            mix_path=str(mix_path), out_dir=str(out_dir / f"iter{it}"),
-            device=args.device, seed=args.seed + it, epochs=args.epochs,
-            batch_size=args.batch_size, lr=args.lr, kl_lambda=args.kl_lambda,
-            eval_mode=args.eval_mode, eval_every_steps=0,
-            eval_levels=tuple(args.eval_levels), eval_workers=args.eval_workers,
-            plateau_patience=args.patience,
-            fixtures_dir=args.fixtures_dir, fixtures_games=args.fixtures_games)
-        trainer = FTSFTTrainer(cfg)
-        done = trainer.train()
-        done["iteration"] = it
-        done["corrections"] = len(corrections)
-        summary.append(done)
-        final = done.get("final_model")
-        if final:
-            policy_path = final
+    it = 0
+    try:
+        while args.iterations <= 0 or it < args.iterations:
+            it += 1
+            show(f"poc iter {it}: playing {args.games} games...")
+            states = rollout_positions(policy_path, args.games, stop_pieces=0,
+                                       opening_plies=8, seed=args.seed * 1000 + it,
+                                       device=args.device,
+                                       batch_size=args.batch_size,
+                                       max_plies=MAX_POC_PLIES, progress=progress)
+            tasks = [(s["fen"], s["model_move"]) for s in states]
+            scores = poc_score(tasks, engine_path=args.engine, depth=args.depth,
+                               workers=args.workers, score_fn=score_fn,
+                               progress=progress)
+            corrections = build_corrections(
+                states, scores, cp_threshold=args.cp_threshold,
+                mate_piece_gate=args.mate_piece_gate,
+                quick_mate_plies=args.quick_mate_plies,
+                mate_slack_plies=args.mate_slack_plies)
+            mix_path = out_dir / f"mix_iter{it}.jsonl"
+            jsonl_write(mix_path, corrections)
+            n_failed = sum(1 for t in tasks
+                           if scores.get(t[0], {}).get("best_uci") is None)
+            print(f"✅ poc iter {it}: {len(states)} states, "
+                  f"{len(corrections)} correction rows "
+                  f"({n_failed} scored failed)", flush=True)
+            if not corrections:
+                summary.append({"iteration": it, "corrections": 0})
+                continue
+            cfg = FTSFTConfig(
+                model_path=policy_path, base_path=base_path,
+                mix_path=str(mix_path), out_dir=str(out_dir / f"iter{it}"),
+                device=args.device, seed=args.seed + it, epochs=args.epochs,
+                batch_size=args.batch_size, lr=args.lr,
+                kl_lambda=args.kl_lambda, eval_mode=args.eval_mode,
+                eval_every_steps=0, eval_levels=tuple(args.eval_levels),
+                eval_workers=args.eval_workers,
+                plateau_patience=args.patience,
+                fixtures_dir=args.fixtures_dir,
+                fixtures_games=args.fixtures_games)
+            trainer = FTSFTTrainer(cfg)
+            done = trainer.train()
+            done["iteration"] = it
+            done["corrections"] = len(corrections)
+            summary.append(done)
+            final = done.get("final_model")
+            if final:
+                policy_path = final
+    except KeyboardInterrupt:
+        print(f"\n⏹️ poc loop interrupted after {len(summary)} completed "
+              f"iterations; last policy: {policy_path}", flush=True)
     print(f"✅ poc loop done: {summary}", flush=True)
     return summary
 
@@ -245,8 +254,10 @@ def main() -> None:
                     "KL-anchored micro fine-tune -> repeat")
     parser.add_argument("--model-path", default="base_model")
     parser.add_argument("--out-dir", default="results/poc_loop")
-    parser.add_argument("--iterations", type=int, default=6)
-    parser.add_argument("--games", type=int, default=500)
+    parser.add_argument("--iterations", type=int, default=6,
+                        help="number of iterations; 0 = run until Ctrl-C")
+    parser.add_argument("--games", type=int, default=500,
+                        help="fresh self-play games per iteration")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=5e-5)
