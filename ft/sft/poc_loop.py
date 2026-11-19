@@ -259,13 +259,13 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
     records_loaded = False
     cached_records = load_base_records(records_path, records_meta)
     if cached_records is not None:
+        records_loaded = True
         records_cache[base_path] = cached_records
+        print(f"\u267b\ufe0f loaded {len(cached_records)} cached base engine "
+              f"records from {records_path}", flush=True)
     eval_seed = getattr(args, "eval_seed", None)
     if eval_seed is None:
         eval_seed = args.seed   # anchored: same eval openings every iteration
-        records_loaded = True
-        print(f"\u267b\ufe0f loaded {len(cached_records)} cached base engine "
-              f"records from {records_path}", flush=True)
     try:
         while args.iterations <= 0 or it < args.iterations:
             it += 1
