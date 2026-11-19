@@ -25,6 +25,12 @@ reference (``--base-path base_model``) so the KL anchor and the paired
 eval baseline do not silently drift with the policy. The base model's
 engine-game records are cached to ``base_engine_records.jsonl`` in the
 out dir and reused across resumes (the games are deterministic).
+
+Artifacts at the run level (``--out-dir``): ``base_engine_records.jsonl``
+(base games cache), ``metrics.jsonl`` (every eval row, tagged ``iteration``
+— the centralized view of all per-iter trainer metrics), and
+``summary.jsonl`` (one row per completed iteration: corrections, best
+score, timings, GPU line). Per-iteration detail stays under ``iterN/``.
 """
 from __future__ import annotations
 
@@ -300,6 +306,11 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                   f"scoring {t2 - t1:.0f}s | train+eval pending...", flush=True)
             if not corrections:
                 summary.append({"iteration": it, "corrections": 0})
+                with open(out_dir / "metrics.jsonl", "a") as f:
+                    f.write(json.dumps({"iteration": it, "corrections": 0,
+                                        "elapsed": time.monotonic() - t0,
+                                        "note": "no corrections"},
+                                       sort_keys=True) + "\n")
                 continue
             cfg = FTSFTConfig(
                 model_path=policy_path, base_path=base_path,
@@ -329,10 +340,18 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
             final = done.get("final_model")
             if final:
                 policy_path = final
+            gpu = _gpu_memory_line(args.device)
+            done["gpu"] = gpu
+            with open(out_dir / "summary.jsonl", "a") as f:
+                f.write(json.dumps(done, sort_keys=True) + "\n")
+            run_metrics = out_dir / "metrics.jsonl"
+            with open(run_metrics, "a") as f:
+                for row in trainer.metric_rows():
+                    row["iteration"] = it
+                    f.write(json.dumps(row, sort_keys=True) + "\n")
             print(f"\u23f1\ufe0f poc iter {it}: selfplay {t1 - t0:.0f}s | "
                   f"scoring {t2 - t1:.0f}s | train+eval {done_s - t2:.0f}s | "
                   f"total {done_s - t0:.0f}s", flush=True)
-            gpu = _gpu_memory_line(args.device)
             if gpu:
                 print(f"  {gpu}", flush=True)
     except KeyboardInterrupt:
