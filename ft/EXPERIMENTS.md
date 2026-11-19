@@ -18,8 +18,12 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 ## How models are evaluated (3 instruments, all paired vs base)
 
 1. **Paired engine games** (Elo-like): full games vs the official alpha-beta
-   engine, levels 0–3, fixed openings/seeds both colors (~320 games);
-   delta + cell-bootstrap sigma. FastEngine for L1–3 (move-identical, ~4×).
+   engine, levels 1–3, fixed openings/seeds both colors (~240 games);
+   delta + cell-bootstrap sigma. FastEngine for L1–3 (move-identical, ~4×)
+   [level 0 removed by decision mid-campaign (run7b clean restart): the
+   official metric is (S1+S2+S3)/3, never used L0, and vs-random deltas
+   sit at the score ceiling where cells are coin flips — pure noise;
+   `--eval-levels` restores it if ever wanted].
 2. **Paired self-play proxy** (tournament proxy): 200 openings × 2 colors
    vs base. `balanced = mean(engine, proxy)` drives selection/plateau.
 3. **Frozen fixtures** (single forward pass, sub-second): 500 verified
@@ -71,6 +75,11 @@ Robust conclusions (946k params):
 ## Decision rules (pre-registered)
 
 - Checkpoints qualify only via `balanced − 2σ > 0`; fixtures are diagnostics.
+- Protocol amendment (user-directed, run7b clean restart): paired evals
+  now cover levels 1–3 only (L0 dropped — never part of the official
+  score, and its ceiling deltas only injected variance). Pre-registered
+  pass/kill wording is unchanged; the first run7 block (16 iterations,
+  pre-#41) remains ledgered under the old definition for the record.
 - Fixtures deltas only count beyond their noise bands (see above).
 - Note: contrastive rows already carry full CE toward the good move at
   weight 1.0 (`ft_loss` runs `weighted_ce` over the whole batch) — "punish

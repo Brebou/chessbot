@@ -404,7 +404,10 @@ def main() -> None:
     parser.add_argument("--selfplay-games", type=int, default=200,
                         help="head-to-head games in the paired proxy eval")
     parser.add_argument("--eval-levels", type=int, nargs="+",
-                        default=[0, 1, 2, 3])
+                        default=[1, 2, 3],
+                        help="engine levels for the paired eval; the official "
+                             "metric is (S1+S2+S3)/3 and level 0 (random "
+                             "opponent) only adds noise at the ceiling")
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--fixtures-dir", default="")
     parser.add_argument("--fixtures-games", default="")
