@@ -272,7 +272,7 @@ def engine_opponent_states(model_path: str, n_games: int, *, opening_plies: int,
         from chess_hw.match import run_tasks
 
         results = run_tasks(_mix_engine_game_task, tasks,
-                            {"m": str(model_path)}, workers, progress=False)
+                            {"m": str(model_path)}, workers, progress=True)
     states = [s for record in results for s in record]
     show(f"poc rollouts: {len(states)} model states from {n_games} "
          f"engine-opponent games", force=True)
