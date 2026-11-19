@@ -96,13 +96,23 @@ def paired_engine_eval(candidate_path: str, base_path: str, *, levels=(0, 1, 2, 
         metric_stds.append(sum(sample) / n)
     mean_of_means = sum(metric_stds) / len(metric_stds)
     sigma = (sum((m - mean_of_means) ** 2 for m in metric_stds) / (n_bootstrap - 1)) ** 0.5
-    per_level = {}
-    for (lvl, _, _), d in zip(cell_keys, deltas):
-        per_level.setdefault(str(lvl), []).append(d)
+    per_level_delta: Dict[str, List[float]] = {}
+    per_level_cand: Dict[str, List[float]] = {}
+    per_level_base: Dict[str, List[float]] = {}
+    for key, d in zip(cell_keys, deltas):
+        lvl = str(key[0])
+        per_level_delta.setdefault(lvl, []).append(d)
+        per_level_cand.setdefault(lvl, []).append(cand_scores[key])
+        per_level_base.setdefault(lvl, []).append(base_scores[key])
+    mean = lambda v: sum(v) / len(v)
     return {"delta": mean_delta, "sigma": sigma,
             "significant": mean_delta - 2 * sigma > 0,
             "n_cells": len(cell_keys),
-            "per_level_delta": {k: sum(v) / len(v) for k, v in per_level.items()},
+            "cand_score": mean([cand_scores[k] for k in cell_keys]),
+            "base_score": mean([base_scores[k] for k in cell_keys]),
+            "per_level_delta": {k: mean(v) for k, v in per_level_delta.items()},
+            "per_level_cand": {k: mean(v) for k, v in per_level_cand.items()},
+            "per_level_base": {k: mean(v) for k, v in per_level_base.items()},
             "base_records": base}
 
 

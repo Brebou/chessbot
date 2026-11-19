@@ -184,6 +184,12 @@ def test_paired_eval_with_fake_records(monkeypatch):
     assert res["sigma"] == pytest.approx(0.0, abs=1e-9)
     assert res["significant"] is True
     assert res["n_cells"] == 8
+    assert res["cand_score"] == pytest.approx(1.0)
+    assert res["base_score"] == pytest.approx(0.0)
+    assert res["per_level_cand"] == {"0": pytest.approx(1.0),
+                                     "1": pytest.approx(1.0)}
+    assert res["per_level_base"] == {"0": pytest.approx(0.0),
+                                     "1": pytest.approx(0.0)}
 
 
 # -- dagger --------------------------------------------------------------------
