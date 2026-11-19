@@ -529,6 +529,49 @@ def test_base_records_cache_roundtrip(tmp_path):
     assert load_base_records(path, meta) is None
 
 
+def test_allocate_level_counts_rounding_and_validation():
+    from ft.sft.poc_loop import allocate_level_counts
+
+    with pytest.raises(ValueError):
+        allocate_level_counts(10, [0.5, 0.3])
+    assert allocate_level_counts(0, [0.1, 0.3, 0.6]) == [0, 0, 0]
+    assert allocate_level_counts(10, [0.1, 0.3, 0.6]) == [1, 3, 6]
+    counts = allocate_level_counts(7, [0.1, 0.3, 0.6])
+    assert counts == [1, 2, 4]
+    assert sum(counts) == 7
+    counts = allocate_level_counts(8, [0.1, 0.3, 0.6])
+    assert counts == [1, 2, 5] and sum(counts) == 8
+
+
+def test_engine_opponent_states_mix_and_row_shape():
+    from ft.sft.poc_loop import engine_opponent_states
+
+    tasks: list = []
+
+    def game_fn(task):
+        tasks.append(task)
+        oid, model_white, level, opening_plies, max_plies, seed = task
+        return [{"fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                 "history": [], "model_move": "e2e4"}]
+
+    states = engine_opponent_states("_unused", 10, opening_plies=8,
+                                    seed="0-1", engine_levels=[1, 2, 3],
+                                    level_probs=[0.1, 0.3, 0.6], workers=1,
+                                    max_plies=250, game_fn=game_fn)
+    assert len(tasks) == 10
+    assert len(states) == 10
+    for state in states:
+        assert set(state) == {"fen", "history", "model_move"}
+    assert [bool(t[1]) for t in tasks] == [g % 2 == 0 for g in range(10)]
+    levels = [t[2] for t in tasks]
+    for level, expected in zip((1, 2, 3), (1, 3, 6)):
+        assert levels.count(level) == expected
+    assert engine_opponent_states("_unused", 0, opening_plies=8, seed="0-1",
+                                  engine_levels=[1], level_probs=[1.0],
+                                  workers=1, max_plies=250,
+                                  game_fn=game_fn) == []
+
+
 def test_poc_loop_single_iteration_smoke(tiny_model, tmp_path):
     from types import SimpleNamespace
 
