@@ -590,6 +590,78 @@ def test_use_fixtures_gating():
     assert not _use_fixtures(missing, 4, 4)
 
 
+def test_softmax_weights_stable_and_ordered():
+    from ft.sft.poc_loop import _softmax_weights
+
+    w = _softmax_weights([0.0, -50.0, -150.0], temp=100.0)
+    assert abs(sum(w) - 1.0) < 1e-9
+    assert w[0] > w[1] > w[2] > 0
+    assert abs(w[1] - math.exp(-0.5) / (1 + math.exp(-0.5) + math.exp(-1.5))) < 1e-9
+    one = _softmax_weights([0.0], temp=100.0)
+    assert one == [1.0]
+    mate_scale = _softmax_weights([10000.0, 9850.0, -10000.0], temp=100.0)
+    assert abs(sum(mate_scale) - 1.0) < 1e-9
+    assert 0 < mate_scale[1] < 0.5
+    assert mate_scale[2] < 1e-10
+
+
+def test_dense_lambda_normalization():
+    from ft.sft.poc_loop import _dense_lambda
+
+    assert _dense_lambda(0, 0, 8) == 0.0
+    assert _dense_lambda(16, 8, 8) == 0.25
+    assert _dense_lambda(7, 700, 8) == pytest.approx(7 / 700 / 8)
+
+
+def test_build_dense_rows_band_weights_and_played_move():
+    from ft.sft.poc_loop import build_dense_rows
+
+    def state(fen, move):
+        return {"fen": fen, "history": [], "model_move": move}
+
+    def scores(cp_best, cp_model, table, mate_best=None, mate_model=None):
+        return {"cp_best": cp_best, "cp_model": cp_model,
+                "mate_best": mate_best, "mate_model": mate_model,
+                "best_uci": table[0][0] if table else None,
+                "multipv": [{"uci": u, "cp": cp} for u, cp in table]}
+
+    states = [
+        state("FEN_X", "b1b2"),
+        state("FEN_BLUNDER", "b1b2"),
+        state("FEN_TINY", "b1b2"),
+        state("FEN_MATE", "b1b2"),
+        state("FEN_OUTSIDE", "e2e4"),
+    ]
+    sc = {
+        "FEN_X": scores(0, -100, [("b1b2", -50), ("c1c2", -60), ("d1d2", -150)]),
+        "FEN_BLUNDER": scores(0, -300, [("b1b2", 0), ("c1c2", -50)]),
+        "FEN_TINY": scores(0, -20, [("b1b2", -5), ("c1c2", -10)]),
+        "FEN_MATE": scores(0, -100, [("b1b2", 0), ("c1c2", -50)],
+                           mate_best=2),
+        "FEN_OUTSIDE": scores(0, -100, [("c1c2", -50), ("d1d2", -60)]),
+    }
+    rows, n = build_dense_rows(states, sc, cp_threshold=150.0,
+                               dense_cp=35.0, dense_temp=100.0)
+    assert n == 2
+    keys = {r["key"] for r in rows}
+    assert keys == {"FEN_X", "FEN_OUTSIDE"}
+    assert all(r["bucket"] == "dense" for r in rows)
+    by_key: dict = {}
+    for r in rows:
+        by_key.setdefault(r["key"], []).append(r)
+    x = by_key["FEN_X"]
+    assert [r["target"] for r in x] == ["b1b2", "c1c2", "d1d2"]
+    assert abs(sum(r["weight"] for r in x) - 1.0) < 1e-9
+    assert x[0]["weight"] > x[1]["weight"] > x[2]["weight"]
+    outside = by_key["FEN_OUTSIDE"]
+    assert [r["target"] for r in outside] == ["c1c2", "d1d2", "e2e4"]
+    assert abs(sum(r["weight"] for r in outside) - 1.0) < 1e-9
+    assert outside[2]["weight"] < outside[0]["weight"]
+    empty, n_empty = build_dense_rows([], {}, cp_threshold=150.0,
+                                      dense_cp=35.0, dense_temp=100.0)
+    assert empty == [] and n_empty == 0
+
+
 def test_poc_loop_single_iteration_smoke(tiny_model, tmp_path):
     from types import SimpleNamespace
 
