@@ -381,7 +381,8 @@ class FTSFTTrainer:
                    "elapsed": time.monotonic() - started}
             row["val_ce"] = val_loss(self.model, self.val_items, self.tokenizer,
                                      self.device)
-            for bucket in ("normal", "mate", "endgame_tb", "contrastive"):
+            for bucket in ("normal", "dense", "mate", "endgame_tb",
+                           "contrastive"):
                 row[f"val_ce_{bucket}"] = val_loss(self.model, self.val_items,
                                                    self.tokenizer, self.device,
                                                    bucket=bucket)

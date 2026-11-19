@@ -9,12 +9,19 @@ Nothing is reused from previous collections or mixes. Each iteration:
    seeded random fallback;
 2. scores every visited state's played move at a LOW engine depth:
    analysis before, push the model move, analysis after (both mover-POV);
-3. keeps correction rows only for the three explicit failure classes —
+3. keeps correction rows only for the three explicit failure classes
    eval loss > cp_threshold, missed forced mate in <= quick_mate_plies,
    endgame (<= mate_piece_gate pieces) failure to convert a forced mate
    within mate_slack plies. Asymmetric endgames (KRK-style, many mating
    moves) emit one row per equally-fast mating alternative (multipv),
    weight 1/n;
+3b. when --dense-cp is set (run8 = 35), also emits a dense soft-policy
+   bucket: one row per root-multipv move (softmax over cp at temperature
+   --dense-temp, played move kept when present/estimated otherwise) for
+   every state whose eval drop is in (dense-cp, cp-threshold] cp. That
+   state's weights sum to 1 and the whole bucket's loss mass is
+   normalized to (m/n)/8 of the correction states' mass
+   (--dense-mass-div, m = correction states, n = dense states);
 4. briefly fine-tunes on the fresh corrections only, with a forward-KL
    anchor to the frozen base policy (--kl-lambda) and a small lr;
 5. evaluates paired vs base at the trainer's epoch ends, then discards the
@@ -40,12 +47,13 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import random
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -146,11 +154,14 @@ def _poc_score_task(task):
                       if after_pov.is_mate() and after_pov.mate() != 0 else None)
         return {"fen": fen, "cp_best": cp_best, "mate_best": mate_best,
                 "cp_model": cp_model, "mate_model": mate_model,
-                "best_uci": first["pv"][0].uci(), "alt_mates": alt_mates}
+                "best_uci": first["pv"][0].uci(), "alt_mates": alt_mates,
+                "multipv": [{"uci": i["pv"][0].uci(),
+                             "cp": score_to_mover(i["score"])}
+                            for i in infos]}
     except Exception:
         return {"fen": fen, "cp_best": None, "mate_best": None,
                 "cp_model": None, "mate_model": None, "best_uci": None,
-                "alt_mates": []}
+                "alt_mates": [], "multipv": []}
 
 
 def poc_score(tasks: List[tuple], *, engine_path: str, depth: int,
@@ -338,6 +349,59 @@ def build_corrections(states: List[dict], scores: Dict[str, dict], *,
     return rows
 
 
+def _softmax_weights(cps: List[float], temp: float) -> List[float]:
+    """Stable softmax over scores shifted by the max (sub-1 exponents)."""
+    top = max(cps)
+    exps = [math.exp((c - top) / temp) for c in cps]
+    total = sum(exps)
+    return [e / total for e in exps]
+
+
+def _dense_lambda(m_corr: int, n_dense: int, mass_div: int) -> float:
+    if n_dense <= 0:
+        return 0.0
+    return (m_corr / n_dense) / mass_div
+
+
+def build_dense_rows(states: List[dict], scores: Dict[str, dict], *,
+                     cp_threshold: float, dense_cp: float,
+                     dense_temp: float) -> Tuple[List[dict], int]:
+    """Dense soft-target rows (bucket `dense`) for sub-optimal but
+    non-blunder states: eval drop in (dense_cp, cp_threshold] cp. Targets
+    are the root multipv table (played move appended with its estimated cp
+    when not in the table), weights = softmax(cp / dense_temp) so each
+    state's weights sum to 1. Returns (rows, n_dense_states)."""
+    rows: List[dict] = []
+    n_states = 0
+    for s in states:
+        sc = scores.get(s["fen"])
+        if sc is None or sc.get("best_uci") is None:
+            continue
+        cp_best = sc.get("cp_best")
+        cp_model = sc.get("cp_model")
+        if cp_best is None or cp_model is None:
+            continue
+        if sc.get("mate_best") is not None or sc.get("mate_model") is not None:
+            continue
+        drop = cp_best - cp_model
+        if not (dense_cp < drop <= cp_threshold):
+            continue
+        table = sc.get("multipv") or []
+        if len(table) < 2:
+            continue
+        entries = [(t["uci"], float(t["cp"])) for t in table]
+        if s["model_move"] not in [u for u, _ in entries]:
+            entries.append((s["model_move"], float(cp_best) - drop))
+        entries.sort(key=lambda e: -e[1])
+        weights = _softmax_weights([c for _, c in entries], dense_temp)
+        n_states += 1
+        for (uci, _), p in zip(entries, weights):
+            rows.append({"bucket": "dense", "key": s["fen"],
+                         "start_fen": s["fen"], "history": s["history"],
+                         "target": uci, "weight": p})
+    return rows, n_states
+
+
 def _use_fixtures(args, it: int, n_completed: int) -> bool:
     if not getattr(args, "fixtures_dir", ""):
         return False
@@ -412,8 +476,26 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                 mate_piece_gate=args.mate_piece_gate,
                 quick_mate_plies=args.quick_mate_plies,
                 mate_slack_plies=args.mate_slack_plies)
+            dense_cp = float(getattr(args, "dense_cp", 0.0) or 0.0)
+            if dense_cp > 0:
+                dense_rows, n_dense = build_dense_rows(
+                    states, scores, cp_threshold=args.cp_threshold,
+                    dense_cp=dense_cp,
+                    dense_temp=float(getattr(args, "dense_temp", 100.0)))
+                if dense_rows:
+                    lam = _dense_lambda(
+                        len({r["key"] for r in corrections}), n_dense,
+                        int(getattr(args, "dense_mass_div", 8)))
+                    for r in dense_rows:
+                        r["weight"] *= lam
+                    print(f"\U0001f9e9 dense: {n_dense} states, "
+                          f"{len(dense_rows)} rows, lambda={lam:.4g}",
+                          flush=True)
+            else:
+                dense_rows = []
+            mix_rows = corrections + dense_rows
             mix_path = out_dir / f"mix_iter{it}.jsonl"
-            jsonl_write(mix_path, corrections)
+            jsonl_write(mix_path, mix_rows)
             t2 = time.monotonic()
             n_failed = sum(1 for t in tasks
                            if scores.get(t[0], {}).get("best_uci") is None)
@@ -540,6 +622,17 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--fixtures-dir", default="")
     parser.add_argument("--fixtures-games", default="")
+    parser.add_argument("--dense-cp", type=float, default=0.0,
+                        help="enable the dense soft-policy loss: soft-CE "
+                             "over the multipv table for states whose eval "
+                             "drop is in (dense-cp, cp-threshold] cp; 0 = "
+                             "off (run8: 35)")
+    parser.add_argument("--dense-temp", type=float, default=100.0,
+                        help="softmax temperature in cp for the dense "
+                             "soft targets")
+    parser.add_argument("--dense-mass-div", type=int, default=8,
+                        help="dense loss mass = correction-states mass "
+                             "(m/n) / this divisor")
     parser.add_argument("--fixtures-every", type=int, default=1,
                         help="run fixture diagnostics every N iterations "
                              "(always on the first iteration); 1 = every "

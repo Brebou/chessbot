@@ -12,7 +12,7 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | Submission candidate | `base_model` (paired score 0.231) |
 | Fallback | `results/sft/run1/final` (0.210) |
 | Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified (10 post-training runs, ~60 evals) |
-| Local suite | 138 passed / 7 skipped (#41–#44 + mixed-rollouts add tests; pending merge) |
+| Local suite | 142 passed / 7 skipped (#41–#50 + dense-soft-loss tests; pending merge) |
 | Current stage | run5 **killed**; poc/run7 flat-negative steady state over 16 iterations; decision pending: run8 (rehearsal-share amendment) or stop and submit `base_model` |
 
 ## How models are evaluated (3 instruments, all paired vs base)
@@ -95,6 +95,27 @@ Robust conclusions (946k params):
   only (never part of qualification); `--fixtures-every N` (default 1)
   thins them to every Nth iteration, always keeping the first — does
   not change the eval protocol or pass/kill criteria.
+- Pre-registered **run8** (dense soft-policy loss, user-directed 2025):
+  run7b recipe unchanged (mixed rollouts, 1 epoch/iter, KL 0.1,
+  corrections >150 cp) **plus** a dense soft-CE bucket for states whose
+  eval drop is in (35, 150] cp: targets = root multipv table softmax at
+  T=100 cp (played move kept when present in the table, estimated
+  cp_best − drop otherwise; per-state weights sum to 1); ALL such states
+  selected; whole-bucket loss mass = (m/n)/8 of the correction states'
+  mass (m = correction states, n = dense states; per-row weight =
+  softmax × λ). Flags: `--dense-cp 35 --dense-temp 100
+  --dense-mass-div 8` (dense off by default → run7b resumes stay
+  comparable). Pass/kill wording unchanged: pass = balanced − 2σ > 0 or
+  corrections/iteration shrinks; kill = captures < 55% or balanced
+  ≤ −0.05 at iteration 4. New monitor: `val_ce_dense` (own bucket) plus
+  the run5 signal `val_ce_normal` drift.
+- Dense-loss selection rationale (signal design, user-directed):
+  sub-optimal-but-not-blunder states = the sparse-gradient gap —
+  corrections never touch them and single-target CE would over-pin one
+  move where several are near-equal; soft CE redistributes mass between
+  near-equal moves instead of punishing ("punish must also build").
+  Cost note: all-state selection grows steps/iter ~3–5× (GPU-cheap,
+  wall-clock visible).
 - Fixtures deltas only count beyond their noise bands (see above).
 - Note: contrastive rows already carry full CE toward the good move at
   weight 1.0 (`ft_loss` runs `weighted_ce` over the whole batch) — "punish
