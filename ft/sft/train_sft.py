@@ -262,17 +262,21 @@ class FTSFTTrainer:
         row: Dict = {"eval_tag": tag}
         if cfg.eval_mode == "paired":
             base_path = cfg.base_path or cfg.model_path
+            t0 = time.monotonic()
             paired = paired_engine_eval(
                 str(cand), base_path, levels=cfg.eval_levels,
                 n_openings=cfg.eval_n_openings, seed=cfg.seed,
                 workers=cfg.eval_workers, n_bootstrap=cfg.eval_bootstrap,
                 records_cache=self._records_cache)
+            row["engine_seconds"] = time.monotonic() - t0
             for key in list(self._records_cache):
                 if key != base_path:
                     del self._records_cache[key]
+            t0 = time.monotonic()
             proxy = selfplay_paired(str(cand), base_path,
                                     n_games=cfg.selfplay_games, seed=cfg.seed,
                                     workers=cfg.eval_workers)
+            row["proxy_seconds"] = time.monotonic() - t0
             row["engine_delta"] = paired["delta"]
             row["engine_sigma"] = paired["sigma"]
             row["engine_per_level_delta"] = paired["per_level_delta"]
@@ -309,6 +313,11 @@ class FTSFTTrainer:
             lines.append(f"  engine sigma={row['engine_sigma']:.4f} "
                          f"qualifies (delta - 2*sigma > 0): "
                          f"{row.get('significant')}")
+        eng_s = row.get("engine_seconds")
+        proxy_s = row.get("proxy_seconds")
+        if eng_s is not None or proxy_s is not None:
+            lines.append(f"  eval timing: engine {eng_s or 0:.0f}s | "
+                         f"proxy {proxy_s or 0:.0f}s")
         fx = row.get("fixtures")
         if fx:
             lines.append(

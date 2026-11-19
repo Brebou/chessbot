@@ -19,12 +19,21 @@ Nothing is reused from previous collections or mixes. Each iteration:
 
 The point is fast feedback on whether ANY post-training update to this
 946k-param model can be made non-negative.
+
+Resume: pass the last policy as ``--model-path`` and keep the frozen
+reference (``--base-path base_model``) so the KL anchor and the paired
+eval baseline do not silently drift with the policy. The base model's
+engine-game records are cached to ``base_engine_records.jsonl`` in the
+out dir and reused across resumes (the games are deterministic).
 """
 from __future__ import annotations
 
 import argparse
 import gc
+import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -44,8 +53,39 @@ MATE_PIECE_GATE = 10
 MATE_SLACK_PLIES = 1
 MULTIPV = 5
 MAX_POC_PLIES = 250
+BASE_RECORDS_NAME = "base_engine_records.jsonl"
+BASE_RECORDS_SCHEMA = 1
 
 _POC_ENGINES: Dict = {}
+
+
+def base_records_meta(base_path: str, levels, n_openings: int, seed: int) -> dict:
+    return {"schema": BASE_RECORDS_SCHEMA,
+            "base_path": str(Path(base_path).resolve()),
+            "levels": sorted(set(levels)),
+            "n_openings": n_openings,
+            "seed": seed}
+
+
+def save_base_records(path: Path, meta: dict, records: list) -> None:
+    tmp = path.with_suffix(".tmp.jsonl")
+    with open(tmp, "w") as f:
+        f.write(json.dumps({"meta": meta}) + "\n")
+        for rec in records:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
+def load_base_records(path: Path, meta: dict) -> Optional[list]:
+    try:
+        with open(path) as f:
+            header = json.loads(f.readline())
+            if header.get("meta") != meta:
+                return None
+            records = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError):
+        return None
+    return records or None
 
 
 def _worker_engine(path: str, depth: int):
@@ -204,25 +244,38 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
     show = progress.show if progress is not None else (lambda msg: None)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    base_path = args.model_path
-    policy_path = base_path
+    base_path = getattr(args, "base_path", "") or args.model_path
+    policy_path = args.model_path
     policy_export = out_dir / "policy"
     policy_export.mkdir(parents=True, exist_ok=True)
     summary: List[dict] = []
     it = 0
     records_cache: Dict[str, list] = {}
+    eval_openings = getattr(args, "eval_openings", 40)
     eval_every = max(1, getattr(args, "eval_every_iterations", 1))
+    records_path = out_dir / BASE_RECORDS_NAME
+    records_meta = base_records_meta(base_path, args.eval_levels,
+                                     eval_openings, args.seed)
+    records_loaded = False
+    cached_records = load_base_records(records_path, records_meta)
+    if cached_records is not None:
+        records_cache[base_path] = cached_records
+        records_loaded = True
+        print(f"\u267b\ufe0f loaded {len(cached_records)} cached base engine "
+              f"records from {records_path}", flush=True)
     try:
         while args.iterations <= 0 or it < args.iterations:
             it += 1
             do_eval = (it % eval_every == 0
                        or (args.iterations > 0 and it == args.iterations))
             show(f"poc iter {it}: playing {args.games} games...")
+            t0 = time.monotonic()
             states = rollout_positions(policy_path, args.games, stop_pieces=0,
                                        opening_plies=8, seed=args.seed * 1000 + it,
                                        device=args.device,
                                        batch_size=args.batch_size,
                                        max_plies=MAX_POC_PLIES, progress=progress)
+            t1 = time.monotonic()
             tasks = [(s["fen"], s["model_move"]) for s in states]
             scores = poc_score(tasks, engine_path=args.engine, depth=args.depth,
                                workers=args.workers, score_fn=score_fn,
@@ -234,11 +287,14 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
                 mate_slack_plies=args.mate_slack_plies)
             mix_path = out_dir / f"mix_iter{it}.jsonl"
             jsonl_write(mix_path, corrections)
+            t2 = time.monotonic()
             n_failed = sum(1 for t in tasks
                            if scores.get(t[0], {}).get("best_uci") is None)
             print(f"✅ poc iter {it}: {len(states)} states, "
                   f"{len(corrections)} correction rows "
                   f"({n_failed} scored failed)", flush=True)
+            print(f"\u23f1\ufe0f poc iter {it}: selfplay {t1 - t0:.0f}s | "
+                  f"scoring {t2 - t1:.0f}s | train+eval pending...", flush=True)
             if not corrections:
                 summary.append({"iteration": it, "corrections": 0})
                 continue
@@ -262,9 +318,17 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
             done["iteration"] = it
             done["corrections"] = len(corrections)
             summary.append(done)
+            done_s = time.monotonic()
+            if not records_loaded and records_cache.get(base_path):
+                save_base_records(records_path, records_meta,
+                                  records_cache[base_path])
+                records_loaded = True
             final = done.get("final_model")
             if final:
                 policy_path = final
+            print(f"\u23f1\ufe0f poc iter {it}: selfplay {t1 - t0:.0f}s | "
+                  f"scoring {t2 - t1:.0f}s | train+eval {done_s - t2:.0f}s | "
+                  f"total {done_s - t0:.0f}s", flush=True)
             gpu = _gpu_memory_line(args.device)
             if gpu:
                 print(f"  {gpu}", flush=True)
@@ -280,6 +344,11 @@ def main() -> None:
         description="Toy loop: fresh self-play games -> correct blunders -> "
                     "KL-anchored micro fine-tune -> repeat")
     parser.add_argument("--model-path", default="base_model")
+    parser.add_argument("--base-path", default="",
+                        help="frozen reference for the KL anchor and paired "
+                             "eval; default: same as --model-path. Pass the "
+                             "original base model when resuming so the eval "
+                             "baseline does not drift with the policy")
     parser.add_argument("--out-dir", default="results/poc_loop")
     parser.add_argument("--iterations", type=int, default=6,
                         help="number of iterations; 0 = run until Ctrl-C")

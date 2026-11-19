@@ -513,10 +513,20 @@ def test_gpu_memory_line_noop_on_cpu():
     assert _gpu_memory_line("cpu") == ""
 
 
-def test_gpu_memory_line_noop_on_cpu():
-    from ft.sft.poc_loop import _gpu_memory_line
+def test_base_records_cache_roundtrip(tmp_path):
+    from ft.sft.poc_loop import base_records_meta, load_base_records, save_base_records
 
-    assert _gpu_memory_line("cpu") == ""
+    meta = base_records_meta("base_model", (0, 1, 2, 3), 40, 0)
+    records = [{"result": "1-0", "meta": {"level": 1}}]
+    path = tmp_path / "base_engine_records.jsonl"
+    save_base_records(path, meta, records)
+    assert load_base_records(path, meta) == records
+    other = base_records_meta("other_model", (0, 1, 2, 3), 40, 0)
+    assert load_base_records(path, other) is None
+    other = base_records_meta("base_model", (0, 1, 2, 3), 20, 0)
+    assert load_base_records(path, other) is None
+    path.write_text("{broken\n")
+    assert load_base_records(path, meta) is None
 
 
 def test_poc_loop_single_iteration_smoke(tiny_model, tmp_path):
