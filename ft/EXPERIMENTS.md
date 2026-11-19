@@ -11,9 +11,9 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 |---|---|
 | Submission candidate | `base_model` (paired score 0.231) |
 | Fallback | `results/sft/run1/final` (0.210) |
-| Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified (8 post-training runs, ~30 evals) |
-| Local suite | 134 passed / 7 skipped |
-| Current stage | run5 + run6 + run7 (toy continuous loop) pre-registered; `base_model` remains submission until one qualifies |
+| Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified (10 post-training runs, ~60 evals) |
+| Local suite | 134 passed / 7 skipped (#41/#42 add tests; pending merge) |
+| Current stage | run5 **killed**; poc/run7 flat-negative steady state over 16 iterations; decision pending: run8 (rehearsal-share amendment) or stop and submit `base_model` |
 
 ## How models are evaluated (3 instruments, all paired vs base)
 
@@ -36,6 +36,7 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | mix_w2, hinge off (run2c / B2) | 10.0% sat. | 55.7–58.5% | −0.03…−0.048 | −0.031…−0.056 | none |
 | mix_it2 = mix + 5.8% DAgger rows, 18,049 on-policy states, engine-labeled (run3) | 8.4–9.2% | 59.0–59.5% (not recovered) | −0.042 → **−0.0156** (closest-to-zero of the campaign, ~1.1σ) | −0.039…−0.034 | none |
 | mix_it2b = mix + 15%-capped DAgger-2 (32,114 CE rows → normal + 20,827 on-policy contrastive pairs; 87,860 states, depth 10), from base (run4) | 7.4–9.6% | 56.5–59.0% (not recovered) | −0.033 → −0.048 (monotone decline; best eval −0.0297) | −0.030…−0.046 | none |
+| mix_it2 continued on the box well past the pre-registered 5 epochs (run5, ~27 epochs, 288-step eval cadence) | 6.6–9.6% | 58.2–62.8% winning-cap late (losing-cap late 20–26%) | −0.040 → −0.081 (monotone decline; epoch-2 local best −0.0247) | −0.034…−0.089 | none — killed per pre-registration |
 
 Robust conclusions (946k params):
 - mate1 dose-responds to CE weight (4.8 → 10%) then saturates; the
@@ -57,6 +58,15 @@ Robust conclusions (946k params):
   eval.
 - The one robust real improvement of the campaign is mate-in-1 (4.8% →
   7.4–10.2% across all variants); it never converts into engine score.
+- poc/run7 (16 iterations, KL-anchored corrections-only) is the least-bad
+  post-training update of the campaign: steady state −0.011 vs base,
+  far better than any corpus SFT run (−0.03…−0.08), but still negative.
+  The course's own on-policy baseline (examples/onpolicy_legality.py,
+  0.225 → 0.256) reaches a positive delta only with on-policy games
+  mixed with distillation AND Lichess replay. The remaining
+  evidence-backed dose to test is therefore a rehearsal/distillation
+  share inside the loop corrections (candidate run8); without it,
+  corrections-only training is bounded flat-to-slightly-negative.
 
 ## Decision rules (pre-registered)
 
@@ -80,6 +90,11 @@ Robust conclusions (946k params):
   `--eval-every-steps 288`, `--plateau-patience 3`, lr 1e-4. run3 was
   stopped by epoch budget at its best eval (−0.0156), never by plateau.
   Kill: if no improving engine trend beyond run3's by end of epoch 3.
+  **Verdict: KILLED.** By end of epoch 3 the engine delta was −0.0484 and
+  it declined monotonically to −0.081 by epoch 27; `val_ce_normal` rose
+  2.63 → 3.55 (drift away from the elite mix), legality-end slipped
+  0.95 → 0.91. The run3 trend did not extend; it was measurement noise
+  around noise, not a real gradient.
 - Pre-registered **run6** (full on-policy correction PoC, corpus-
   independent stabilization): score the model's move on every model-≠-SF
   state of dagger2 at depth 6 (`--build-poc-mix`); a state is a correction
@@ -93,7 +108,20 @@ Robust conclusions (946k params):
   captures-late held ≥ 62%. Kill: KL fails to hold both by epoch 4 of a
   381-step/epoch schedule.
 - Pre-registered **run7** (clean-room toy loop, `ft/sft/poc_loop.py`): no
-  reuse of dagger2 or any collected data. Each iteration plays ~500 fresh
+  reuse of dagger2 or any collected data.
+  **Interim verdict after 16 iterations (neither pass nor kill fired):**
+  the box run deviated from the pre-registration in two ways — epochs
+  defaulted to 2 per iteration (not 1) and fixtures were off, so the
+  captures-late < 55% kill cannot fire. 31 paired evals vs base: mean
+  balanced −0.0109 (sd 0.0110, SE 0.0020 → significantly below 0),
+  end-of-iteration range −0.0281…+0.0031, sigma ≈ 0.015 →
+  `balanced − 2σ > 0` never met; it4 balanced = −0.0056 → kill did not
+  fire. Corrections stable at ~13.2k rows/iteration (~30% of ~44k states,
+  0 failed scores) — no shrinkage over 16 iterations. Level-1 delta is
+  the worst (mean ≈ −0.034, dips to −0.13). The KL anchor visibly holds
+  the line — no downward drift over 16 iterations, unlike every corpus
+  SFT run — but corrections-only training produced no gain, steady state
+  slightly negative. Each iteration plays ~500 fresh
   full self-play games with the current policy (`stop_pieces=0`, openings
   8 plies, 250-ply cap), scores every visited state's played move at depth
   6 (multipv 5, before/after mover-POV), and keeps corrections only for
@@ -129,6 +157,6 @@ Robust conclusions (946k params):
 | ft/run2c (B2) | mix_w2, no hinge | mate1 10% sat., captures not recovered |
 | ft/run3 | DAgger from base (annotation pool) | 18,049 states collected+annotated (depth 10); 0 qualified; engine trend nearest zero of campaign; captures not recovered |
 | ft/run4 | mix_it2b (DAgger-2 15% cap: CE→normal + on-policy pairs), from base, 3 ep | 1,728 steps, 6 evals; balanced declines −0.033 → −0.047; engine best −0.0297; ~1–2σ below run3 at matched step-1152; no qualification |
-| ft/run5 | mix_it2, from base, 5 ep (pre-registered) | **pending** |
+| ft/run5 | mix_it2, from base, 5 ep (pre-registered); extended to ~27 ep on the box; two identical launches appended to the same metrics.jsonl (GPU-float noise only) | **killed per pre-registration**: balanced −0.040 → −0.081 monotone decline; engine never better than run3's −0.0156 (local best −0.0247 at epoch 2); val_ce_normal 2.63 → 3.55; legality-end 0.95 → 0.91; captures-late held ~0.58–0.63 but under the 62% pass bar |
 | ft/run6 | poc corrections-only + KL anchor (λ 0.1, lr 5e-5) | **pending** |
-| poc/run7 | clean-room continuous loop (fresh games, corrections, KL) | **pending** |
+| poc/run7 | clean-room continuous loop (fresh games, corrections, KL); first 16 iterations on the pre-#41 loop, epochs defaulted to 2/iter, fixtures off | **flat-negative, inconclusive**: 31 evals, mean balanced −0.0109 (SE 0.0020, range −0.028…+0.009), 0 qualified, no kill trigger (it4 −0.0056); corrections stable ~13.2k/iter, no shrinkage; KL anchor prevents drift but yields no gain; L1 the worst level |
