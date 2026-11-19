@@ -98,7 +98,8 @@ class FTSFTConfig:
     # paired evaluation
     eval_mode: str = "paired"          # "paired" | "none"
     eval_every_steps: int = 2000       # 0 = epoch end only
-    eval_levels: Tuple[int, ...] = (0, 1, 2, 3)
+    eval_levels: Tuple[int, ...] = (1, 2, 3)   # official metric = (S1+S2+S3)/3;
+                                               # level 0 (random opponent) excluded:
     eval_n_openings: int = 40
     selfplay_games: int = 200
     eval_workers: int = 16
