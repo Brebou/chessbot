@@ -259,10 +259,13 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
     records_loaded = False
     cached_records = load_base_records(records_path, records_meta)
     if cached_records is not None:
-        records_cache[base_path] = cached_records
         records_loaded = True
+        records_cache[base_path] = cached_records
         print(f"\u267b\ufe0f loaded {len(cached_records)} cached base engine "
               f"records from {records_path}", flush=True)
+    eval_seed = getattr(args, "eval_seed", None)
+    if eval_seed is None:
+        eval_seed = args.seed   # anchored: same eval openings every iteration
     try:
         while args.iterations <= 0 or it < args.iterations:
             it += 1
@@ -301,7 +304,7 @@ def run_poc_loop(args, score_fn: Optional[Callable] = None,
             cfg = FTSFTConfig(
                 model_path=policy_path, base_path=base_path,
                 mix_path=str(mix_path), out_dir=str(out_dir / f"iter{it}"),
-                device=args.device, seed=args.seed + it, epochs=args.epochs,
+                device=args.device, seed=eval_seed, epochs=args.epochs,
                 batch_size=args.batch_size, lr=args.lr,
                 kl_lambda=args.kl_lambda,
                 eval_mode=args.eval_mode if do_eval else "none",
@@ -372,6 +375,9 @@ def main() -> None:
                         default=MATE_SLACK_PLIES)
     parser.add_argument("--eval-workers", type=int, default=16)
     parser.add_argument("--eval-mode", default="paired")
+    parser.add_argument("--eval-seed", type=int, default=None,
+                        help="fixed eval seed (same openings/cells at every "
+                             "iteration); default: --seed")
     parser.add_argument("--eval-every-iterations", type=int, default=1,
                         help="paired qualification eval every N iterations")
     parser.add_argument("--eval-openings", type=int, default=40,
