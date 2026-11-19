@@ -91,6 +91,10 @@ Robust conclusions (946k params):
   protocol, seeds, and pass/kill wording unchanged. Effective from
   run7b; all earlier run7 iterations were pure self-play and stay
   ledgered as such.
+- Protocol note (diagnostics cadence): fixture metrics are diagnostics
+  only (never part of qualification); `--fixtures-every N` (default 1)
+  thins them to every Nth iteration, always keeping the first — does
+  not change the eval protocol or pass/kill criteria.
 - Fixtures deltas only count beyond their noise bands (see above).
 - Note: contrastive rows already carry full CE toward the good move at
   weight 1.0 (`ft_loss` runs `weighted_ce` over the whole batch) — "punish

@@ -572,6 +572,24 @@ def test_engine_opponent_states_mix_and_row_shape():
                                   game_fn=game_fn) == []
 
 
+def test_use_fixtures_gating():
+    from types import SimpleNamespace
+
+    from ft.sft.poc_loop import _use_fixtures
+
+    on = SimpleNamespace(fixtures_dir="data/ft_fixtures", fixtures_every=3)
+    assert _use_fixtures(on, 1, 0)
+    assert _use_fixtures(on, 3, 5)
+    assert not _use_fixtures(on, 4, 5)
+    assert _use_fixtures(on, 6, 5)
+    every = SimpleNamespace(fixtures_dir="d")
+    assert _use_fixtures(every, 7, 12)
+    assert not _use_fixtures(SimpleNamespace(fixtures_dir=""), 1, 0)
+    missing = SimpleNamespace(fixtures_dir="data/ft_fixtures", fixtures_every=5)
+    assert _use_fixtures(missing, 5, 4)
+    assert not _use_fixtures(missing, 4, 4)
+
+
 def test_poc_loop_single_iteration_smoke(tiny_model, tmp_path):
     from types import SimpleNamespace
 
