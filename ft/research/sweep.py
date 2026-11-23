@@ -206,10 +206,11 @@ def train_candidate(mix_path: Path, *, model_path: str, base_path: str,
                     out_dir: Path, epochs: int, lr: float, kl: float,
                     batch: int, seed: int, eval_openings: int,
                     selfplay_games: int, eval_workers: int,
-                    records_cache: Dict[str, list]) -> dict:
+                    records_cache: Dict[str, list],
+                    device: str = "cpu") -> dict:
     cfg = FTSFTConfig(
         model_path=model_path, base_path=base_path, mix_path=str(mix_path),
-        out_dir=str(out_dir), device="cpu", seed=seed, epochs=epochs,
+        out_dir=str(out_dir), device=device, seed=seed, epochs=epochs,
         batch_size=batch, lr=lr, kl_lambda=kl, eval_mode="paired",
         eval_every_steps=0, eval_levels=EVAL_LEVELS,
         eval_n_openings=eval_openings, selfplay_games=selfplay_games,
@@ -315,6 +316,11 @@ def main() -> None:
                     choices=["corpus", "sweep", "all", "confirm"])
     ap.add_argument("--confirm-openings", type=int, default=20)
     ap.add_argument("--confirm-seed", type=int, default=999)
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--rehearsal", type=float, default=None,
+                    help="override all configs' rehearsal share")
+    ap.add_argument("--kl", type=float, default=None,
+                    help="override all configs' KL lambda")
     ap.add_argument("--anchor-path", default=None,
                     help="override the KL anchor/eval base (generation-2+ "
                          "continuations: start from --model-path but keep "
@@ -379,6 +385,10 @@ def main() -> None:
         results_path = Path("ft/research/results.jsonl")
         for name in args.configs.split(","):
             cfg = dict(CONFIGS[name])
+            if args.rehearsal is not None:
+                cfg["rehearsal"] = args.rehearsal
+            if args.kl is not None:
+                cfg["kl"] = args.kl
             t0 = time.monotonic()
             mix_path = out_dir / f"mix_{name}.jsonl"
             if cfg.get("cheap_only") and ranks_cache is None:
@@ -402,7 +412,7 @@ def main() -> None:
                 eval_openings=args.eval_openings,
                 selfplay_games=args.selfplay_games,
                 eval_workers=args.eval_workers,
-                records_cache=records_cache)
+                records_cache=records_cache, device=args.device)
             last = done["evals"][-1] if done.get("evals") else {}
             agr = agreement_metrics(done.get("final_model", ""), base_path,
                                     holdout)
