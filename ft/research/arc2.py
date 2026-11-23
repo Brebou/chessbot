@@ -28,7 +28,8 @@ import chess
 
 from ft.common.board_io import n_pieces_from_fen
 from ft.common.serialize import jsonl_write
-from ft.research.sweep import EVAL_LEVELS, base_move_rank, train_candidate
+from ft.research.sweep import (EVAL_LEVELS, base_move_rank, build_mix,
+                               train_candidate)
 from ft.sft.poc_loop import build_corrections, poc_classify, poc_score
 
 MAX_PLY = 250
