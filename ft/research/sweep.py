@@ -186,6 +186,8 @@ CONFIGS: Dict[str, dict] = {
     "t3": {"rehearsal": 1.0, "kl": 0.3, "lr": 5e-5, "epochs": 4},
     "t4": {"rehearsal": 1.0, "kl": 0.3, "lr": 5e-5, "batch": 256},
     "t5": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 4},
+    "t6": {"rehearsal": 5.0, "kl": 0.3, "lr": 5e-5},     # very heavy replay
+    "t7": {"rehearsal": 3.0, "kl": 0.3, "lr": 5e-5, "epochs": 4},
 }
 
 
