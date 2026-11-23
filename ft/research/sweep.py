@@ -181,6 +181,11 @@ CONFIGS: Dict[str, dict] = {
     "r4": {"rehearsal": 1.0, "kl": 0.1, "lr": 1e-4},     # hotter
     "r5": {"rehearsal": 1.0, "kl": 0.1, "lr": 3e-5},     # cooler
     "r6": {"rehearsal": 1.0, "kl": 0.3, "lr": 5e-5},     # stronger leash
+    "t1": {"rehearsal": 1.0, "kl": 0.5, "lr": 5e-5},     # even stronger leash
+    "t2": {"rehearsal": 3.0, "kl": 0.3, "lr": 5e-5},     # heavy replay share
+    "t3": {"rehearsal": 1.0, "kl": 0.3, "lr": 5e-5, "epochs": 4},
+    "t4": {"rehearsal": 1.0, "kl": 0.3, "lr": 5e-5, "batch": 256},
+    "t5": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 4},
 }
 
 
@@ -200,7 +205,10 @@ def main() -> None:
     ap.add_argument("--eval-workers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--configs", default="r1,r2,r3,r4,r5,r6")
-    ap.add_argument("--stage", default="all", choices=["corpus", "sweep", "all"])
+    ap.add_argument("--stage", default="all",
+                    choices=["corpus", "sweep", "all", "confirm"])
+    ap.add_argument("--confirm-openings", type=int, default=20)
+    ap.add_argument("--confirm-seed", type=int, default=999)
     args = ap.parse_args()
     show = (lambda m, force=False: print(m, flush=True))
 
@@ -219,6 +227,39 @@ def main() -> None:
         corpus = list(jsonl_read(corpus_path))
         print(f"corpus: loaded {len(corpus)} states", flush=True)
 
+    if args.stage == "confirm":
+        from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
+
+        base = args.model_path
+        cache: Dict[str, list] = {}
+        for name in args.configs.split(","):
+            mpath = out_dir / name / "final" / "model.safetensors"
+            if not mpath.exists():
+                print(f"confirm skip {name}: no final model", flush=True)
+                continue
+            p = paired_engine_eval(str(mpath), base, levels=EVAL_LEVELS,
+                                   n_openings=args.confirm_openings,
+                                   seed=args.confirm_seed,
+                                   workers=args.eval_workers,
+                                   n_bootstrap=1000, records_cache=cache)
+            s = selfplay_paired(str(mpath), base,
+                                n_games=max(args.selfplay_games, 20),
+                                seed=args.confirm_seed,
+                                workers=args.eval_workers)
+            row = {"run": f"confirm/{name}", "eval_seed": args.confirm_seed,
+                   "openings": args.confirm_openings,
+                   "engine_delta": p["delta"], "sigma": p["sigma"],
+                   "per_level": p["per_level_delta"],
+                   "proxy_delta": s["proxy_delta"],
+                   "balanced": (p["delta"] + s["proxy_delta"]) / 2.0}
+            with open(Path("ft/research/results.jsonl"), "a") as f:
+                f.write(json.dumps(row, sort_keys=True) + chr(10))
+            print(f"🔷 confirm {name}: engine={p['delta']:+.4f} "
+                  f"proxy={s['proxy_delta']:+.4f} balanced={row['balanced']:+.4f} "
+                  f"(sigma {p['sigma']:.4f}, {args.confirm_openings} openings)",
+                  flush=True)
+        return
+
     if args.stage in ("sweep", "all"):
         base_path = args.model_path
         records_cache: Dict[str, list] = {}
@@ -234,8 +275,9 @@ def main() -> None:
                                        seed=args.seed)
             done = train_candidate(
                 mix_path, model_path=args.model_path, base_path=base_path,
-                out_dir=out_dir / name, epochs=args.epochs, lr=cfg["lr"],
-                kl=cfg["kl"], batch=args.batch, seed=args.seed,
+                out_dir=out_dir / name, epochs=cfg.get("epochs", args.epochs),
+                lr=cfg["lr"], kl=cfg["kl"],
+                batch=cfg.get("batch", args.batch), seed=args.seed,
                 eval_openings=args.eval_openings,
                 selfplay_games=args.selfplay_games,
                 eval_workers=args.eval_workers,
