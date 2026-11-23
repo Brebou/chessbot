@@ -205,3 +205,40 @@ Robust conclusions (946k params):
 | ft/run5 | mix_it2, from base, 5 ep (pre-registered); extended to ~27 ep on the box; two identical launches appended to the same metrics.jsonl (GPU-float noise only) | **killed per pre-registration**: balanced −0.040 → −0.081 monotone decline; engine never better than run3's −0.0156 (local best −0.0247 at epoch 2); val_ce_normal 2.63 → 3.55; legality-end 0.95 → 0.91; captures-late held ~0.58–0.63 but under the 62% pass bar |
 | ft/run6 | poc corrections-only + KL anchor (λ 0.1, lr 5e-5) | **pending** |
 | poc/run7 | clean-room continuous loop (fresh games, corrections, KL); first 16 iterations on the pre-#41 loop, epochs defaulted to 2/iter, fixtures off | **flat-negative, inconclusive**: 31 evals, mean balanced −0.0109 (SE 0.0020, range −0.028…+0.009), 0 qualified, no kill trigger (it4 −0.0056); corrections stable ~13.2k/iter, no shrinkage; KL anchor prevents drift but yields no gain; L1 the worst level |
+
+### run9 (auto-research sandbox sweep, CPU, run7-protocol corpus)
+
+Corpus-first protocol: one SF-scored depth-4 corpus shared by all configs,
+fixed eval seed, shared base records cache, every run in
+`ft/research/results.jsonl`. Sweep A (auto9, 15,160 states, 5,204
+corrections) + Sweep B + batch-u + auto10 (24,340/8,369, t5-policy states)
++ batch-w + batch-x + auto11 (19,674/6,269, engine-heavy 400 games) +
+batch-y. ~24 arms total. Champions re-scored on independent cells
+(confirm seed 999 / 555, openings 20).
+
+Verdicts:
+- **Recipe constants are a dead end at this scale**: rehearsal 0-5x,
+  KL 0-0.5, lr 3e-5-4e-4, batch 256-512, epochs 2-12 (n1: 3x t5 dose,
+  234 steps => -0.027), cp-threshold 100 (material curriculum), mate
+  curriculum (proactive mate<=3/5 targets), decode-aware cheap-flip
+  filtering (SF-best in base top-3: 58% of states), corrections-only vs
+  corrections+distill, SF distill at volume (d1-d3: -0.027..-0.067
+  despite 44-56% top-1 movement) -- all within noise or negative.
+- **Generation-2 continuation (x1: t5 recipe from t5-final, KL/eval on
+  original base) does not compound** (engine +0.008 in-sweep, < gen1).
+- **Engine-coverage-dense corpus (auto11, 400 engine games) does not
+  unlock the regime** (y2 in-sweep +0.042 confirmed -> +0.000 on seed 999).
+- **Survivor: t5 recipe** (on-policy corrections + 1:1 rehearsal + KL
+  0.1 + lr 5e-5 + 2-4 ep). Two independent engine cells: +0.029 (999) /
+  +0.004 (555), avg +0.017; balanced +0.002 on both seeds. Positive but
+  far below qualification (needs balanced - 2sigma > 0 at larger eval).
+- Root cause hypothesis for the plateau: sandbox arms all move ~15k-24k
+  depth-4-labelled states in <2,000 steps; the only demonstrated positive
+  lever in the whole project remains scale (course-positive on-policy +
+  distill + replay reached +0.03 at ~500k positions on GPU).
+
+Pre-registration for run10 (GPU box): repeated-generation t5-recipe loop
+at 10-20x sandbox scale (fresh 30k-50k games/gen, SF depth 8 labels,
+KL 0.1, lr 5e-5, 2 ep, corrections+rehearsal 1:1, generation models
+accumulating); qualification only on fresh-seed 40-opening + 200-game
+cells. Sandbox confirms +0.017 is the floor to beat.
