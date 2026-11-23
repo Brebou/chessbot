@@ -375,6 +375,187 @@ def apply_level_gain(corpus: List[dict], gain: Dict[str, float]) -> None:
 SAFETY_MIX = "results/arc2/mix_safety.jsonl"
 
 
+# -- REINFORCE-lite arm: outcome-weighted self-play --------------------------
+
+def collect_outcome_games(model_path: str, oids: List[int], levels: List[int],
+                          *, seed_tag: str = "rein", max_plies: int = MAX_PLY,
+                          ) -> List[dict]:
+    """Play the CURRENT policy vs the class engine (both colors) and keep
+    per-model-move states WITH the game outcome, so rows can be weighted by
+    winning/losing (outcome-selected supervision). Games are fresh each call:
+    never reused across arms/iterations."""
+    from chess_hw.match import EnginePlayer, load_openings, play_game
+    from diag.fast_probe import FastProbePlayer
+    from chess_hw import ChessTokenizer
+    from chess_hw.model import load_model
+
+    model = load_model(model_path, device="cpu")
+    probe = FastProbePlayer(model, ChessTokenizer(), batch_size=256)
+    probe.name = "arc2-rein"
+    book = load_openings()
+    games: List[dict] = []
+    for n, oid in enumerate(oids):
+        for lv in levels:
+            for white_is_model in (True, False):
+                eng = EnginePlayer(lv, seed=f"{seed_tag}-{oid}-{lv}")
+                if white_is_model:
+                    rec = play_game(probe, eng, book[oid], oid, max_plies=max_plies)
+                else:
+                    rec = play_game(eng, probe, book[oid], oid, max_plies=max_plies)
+                board = chess.Board()
+                for u in book[oid]:
+                    board.push_uci(u)
+                hist = list(book[oid])
+                start = len(book[oid])
+                mstates = []
+                for i in range(start, len(rec.moves)):
+                    is_model_ply = ((i - start) % 2 == 0) == white_is_model
+                    if is_model_ply:
+                        mstates.append({"fen": board.fen(),
+                                        "history": list(hist),
+                                        "model_move": rec.moves[i]})
+                    board.push_uci(rec.moves[i])
+                    hist.append(rec.moves[i])
+                # result POV of the model (score 1/0.5/0)
+                from chess_hw.match import score_for
+                sc = score_for(rec.result, chess.WHITE if white_is_model
+                               else chess.BLACK)
+                games.append({"oid": oid, "level": lv,
+                              "out": sc, "states": mstates})
+        if (n + 1) % 50 == 0:
+            print(f"  rein games {n+1}/{len(oids)} ({len(games)} games)",
+                  flush=True)
+    del model, probe
+    return games
+
+
+def build_reinforce_mix(games: List[dict], out_path: Path, *,
+                        engine_path: str, sf_depth: int, sf_workers: int,
+                        w_win: float = 1.0, w_loss: float = 1.0,
+                        w_draw: float = 0.3, cap: int = 12000) -> tuple:
+    """REINFORCE-lite rows: WINNING games -> CE rows pushing UP the model's
+    own played moves (weight w_win); LOSING games -> CE rows to the SF best
+    move when the played move was a blunder (weight w_loss), otherwise a
+    low-weight own-move row; DRAWS -> own moves at w_draw. Outcome selection
+    is the policy-gradient signal."""
+    lose_states: List[dict] = []
+    rows: List[dict] = []
+    for g in games:
+        w = {1.0: w_win, 0.5: w_draw, 0.0: w_loss}[g["out"]]
+        if w <= 0:
+            continue
+        for s in g["states"]:
+            if g["out"] == 0.0:
+                lose_states.append(s)
+                continue
+            rows.append({"bucket": "normal", "key": s["fen"],
+                         "start_fen": s["fen"], "history": s["history"],
+                         "target": s["model_move"], "weight": w})
+    if lose_states:
+        from ft.sft.poc_loop import poc_classify, poc_score
+        from ft.common.board_io import n_pieces_from_fen
+        uniq = {}
+        for s in lose_states:
+            uniq.setdefault(s["fen"], s)
+        print(f"rein: scoring {len(uniq)} unique losing states...", flush=True)
+        scores = poc_score([(s["fen"], s["model_move"]) for s in uniq.values()],
+                           engine_path=engine_path, depth=sf_depth,
+                           workers=sf_workers)
+        n_corr = 0
+        for fen, s in uniq.items():
+            sc = scores.get(fen, {})
+            if not poc_classify(sc.get("cp_best"), sc.get("cp_model"),
+                                sc.get("mate_best"), sc.get("mate_model"),
+                                n_pieces_from_fen(fen)):
+                # not a big blunder per se: low-weight own-move rehearsal
+                rows.append({"bucket": "normal", "key": fen,
+                             "start_fen": fen, "history": s["history"],
+                             "target": s["model_move"],
+                             "weight": w_loss * 0.25})
+                continue
+            best = sc.get("best_uci")
+            rows.append({"bucket": "normal", "key": fen,
+                         "start_fen": fen, "history": s["history"],
+                         "target": best, "weight": w_loss})
+            n_corr += 1
+        print(f"rein: {n_corr} correction rows from {len(uniq)} losing states",
+              flush=True)
+    rng = random.Random("rein-cap")
+    rng.shuffle(rows)
+    if cap and len(rows) > cap:
+        rows = rows[:cap]
+    jsonl_write(out_path, rows)
+    return len(rows), games
+
+
+def run_reinforce_arm(out_dir: Path, *, model_path: str, base_path: str,
+                      cfg: dict, eval_openings: int, selfplay_games: int,
+                      eval_workers: int, eval_seed: int, sf_depth: int,
+                      sf_workers: int, engine_path: str,
+                      records_cache: dict) -> dict:
+    from ft.research.sweep import resolve_engine
+    """One REINFORCE-lite iteration: fresh outcome-qualified games from the
+    book (vs the class engine), outcome-weighted mix, t5-recipe fine-tune,
+    formal paired eval vs base."""
+    import json as _json
+    from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
+    name = cfg.get("name", "d1")
+    t0 = time.monotonic()
+    engine_path = resolve_engine(engine_path)
+    oids = _select_oids(f"rein-{name}", cfg.get("games", 200))
+    games = collect_outcome_games(model_path, oids,
+                                  cfg.get("rein_levels", [1, 2]))
+    n_win = sum(1 for g in games if g["out"] == 1.0)
+    n_loss = sum(1 for g in games if g["out"] == 0.0)
+    print(f"rein games: {len(games)} total, {n_win} wins, {n_loss} losses, "
+          f"{len(games) - n_win - n_loss} draws", flush=True)
+    mix_path = out_dir / f"mix_{name}.jsonl"
+    n_rows, _ = build_reinforce_mix(
+        games, mix_path, engine_path=engine_path, sf_depth=sf_depth,
+        sf_workers=sf_workers, w_win=cfg.get("w_win", 1.0),
+        w_loss=cfg.get("w_loss", 1.0), w_draw=cfg.get("w_draw", 0.3),
+        cap=cfg.get("cap", 12000))
+    done = train_candidate(
+        mix_path, model_path=model_path, base_path=base_path,
+        out_dir=out_dir / name, epochs=cfg.get("epochs", 2), lr=cfg["lr"],
+        kl=cfg["kl"], batch=cfg.get("batch", 128), seed=42,
+        eval_openings=eval_openings, selfplay_games=selfplay_games,
+        eval_workers=eval_workers, records_cache=records_cache,
+        device=cfg.get("device", "cpu"))
+    mpath = done.get("final_model", str(out_dir / name / "final" /
+                                        "model.safetensors"))
+    p = paired_engine_eval(mpath, base_path, levels=EVAL_LEVELS,
+                           n_openings=eval_openings, seed=eval_seed,
+                           workers=eval_workers, n_bootstrap=1000,
+                           records_cache=records_cache)
+    sl = selfplay_paired(mpath, base_path, n_games=selfplay_games,
+                         seed=eval_seed, workers=eval_workers)
+    row = {"run": f"arc2/{name}", "config": cfg, "mix_rows": n_rows,
+           "n_win": n_win, "n_loss": n_loss,
+           "engine_delta": p["delta"], "sigma": p["sigma"],
+           "per_level": p["per_level_delta"],
+           "proxy_delta": sl["proxy_delta"],
+           "balanced": (p["delta"] + sl["proxy_delta"]) / 2.0,
+           "eval_seed": eval_seed,
+           "elapsed_s": round(time.monotonic() - t0)}
+    with open(Path("ft/research/results.jsonl"), "a") as f:
+        f.write(_json.dumps(row, sort_keys=True) + "\n")
+    print(f"done {name}: engine={row['engine_delta']:+.4f} "
+          f"proxy={row['proxy_delta']:+.4f} "
+          f"balanced={row['balanced']:+.4f} (sigma {row['sigma']:.4f})",
+          flush=True)
+    return row
+
+
+REINFORCE_CONFIGS = {
+    "d1": {"games": 200, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.0, "w_draw": 0.3, "cap": 12000, "epochs": 2,
+           "kl": 0.1, "lr": 5e-5},
+    "d2": {"games": 200, "rein_levels": [1], "w_win": 1.0, "w_loss": 1.5,
+           "w_draw": 0.0, "cap": 12000, "epochs": 2, "kl": 0.1, "lr": 5e-5},
+}
+
+
 def run_safety_arm(out_dir: Path, *, model_path: str, base_path: str,
                    eval_openings: int, selfplay_games: int,
                    eval_workers: int, eval_seed: int,
@@ -495,6 +676,23 @@ def main() -> None:
         gc.collect()
     for name in args.configs.split(","):
         if not name:
+            continue
+        if name in REINFORCE_CONFIGS:
+            cfg = dict(REINFORCE_CONFIGS[name])
+            cfg["name"] = name
+            cfg["device"] = args.device
+            cfg.setdefault("batch", args.batch)
+            cfg["engine_path"] = args.engine
+            cfg["sf_depth"] = args.sf_depth
+            cfg["sf_workers"] = args.sf_workers
+            run_reinforce_arm(out_dir, model_path=args.model_path,
+                              base_path=base_path, cfg=cfg,
+                              eval_openings=args.eval_openings,
+                              selfplay_games=args.selfplay_games,
+                              eval_workers=args.eval_workers,
+                              eval_seed=args.eval_seed,
+                              records_cache=records_cache)
+            gc.collect()
             continue
         if corpus is None:
             corpus = load_corpus()

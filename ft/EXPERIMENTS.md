@@ -242,3 +242,38 @@ at 10-20x sandbox scale (fresh 30k-50k games/gen, SF depth 8 labels,
 KL 0.1, lr 5e-5, 2 ep, corrections+rehearsal 1:1, generation models
 accumulating); qualification only on fresh-seed 40-opening + 200-game
 cells. Sandbox confirms +0.017 is the floor to beat.
+
+## ARC2 (open-loop, sandbox): book-aligned on-policy corrections — verdict so far
+The official eval plays paired games from a 31,369-entry bundled opening
+book; previous corpora sampled random opening plies (distribution
+mismatch). Summary of the runs so far (sandbox 10-20 openings, 20
+self-play games; sigma ~0.03):
+
+| arm | recipe | engine | proxy | balanced | verdict |
+| s1   | heuristic safety corpus + rehearsal | +0.0083 | −0.025 | −0.008 | flat, no engine gain |
+| a1   | t5 on book corpus (full) | +0.0083 | +0.025 | +0.017 | marginal |
+| a2   | cp_threshold 100 | +0.0083 | −0.050 | −0.021 | flat |
+| a3   | kl 0.3, lr 1e-4 | +0.0083 | −0.050 | −0.021 | flat |
+| y2   | mate_curric 3.0 + cp 100 + kl 0.3 | +0.0417 | −0.0625 | −0.010 | best engine seen, but noisy; confirm failed on fresh seed (−0.018) |
+| t5   | (run9 survivor) | +0.0042 | 0.0 | +0.002 | confirm on fresh seed 555: +0.004/-0.008 — floor, not a win |
+| b1   | + impact_weight by eval gap | −0.0167 | −0.075 | −0.046 | NEGATIVE — impact weighting hurts (overweights rare cascades) |
+
+### Batch c (pre-registered, queued behind b-batch)
+- **c1**: L1 correction upweight x3 (base headroom is at L1: 0.167 vs 0.069/0.031). Pass: engine delta ≥ +0.04. Kill: negative.
+- **c2**: mirror/color-symmetry augmentation (every row duplicated on `Board.mirror()`). Free 2x data. Pass: delta ≥ +0.03 at same step count.
+- **c3**: L1-gain x2 + rehearsal restricted to L1 states only.
+- **c4**: mirror + L1-gain combo at cap 16k.
+- **c5**: rehearsal dose 2.0 (tests dose–response of grounding rows).
+
+### Batch d (pre-registered, REINFORCE-lite outcome weighting)
+Fresh book games vs the class engine per arm (never reused): WINNING
+games -> CE rows pushing UP the model's own played moves (w_win);
+LOSING games -> CE rows to the SF best move when the played move was a
+blunder (w_loss), else low-weight own-move rows; DRAWS -> w_draw.
+- **d1**: win:loss:draw = 1 : 1 : 0.3, levels {1,2}; **d2**: levels {1} only, w_loss 1.5, w_draw 0.
+- Pass: engine delta ≥ +0.04. Kill: negative engine delta.
+Rationale: outcome selection is the policy-gradient surrogate — own
+moves from wins find their way into future winning lines; losing
+states get real corrections. b1's failure rules out arbitrary impact
+weighting; outcome filtering is a much sharper axis (wins/losses, not
+eval gaps).

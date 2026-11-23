@@ -784,3 +784,36 @@ def test_arc2_level_gain():
     assert corpus[0]["weight"] == 6.0  # multiplies existing weight
     assert corpus[1]["weight"] == 2.0
     assert corpus[3]["weight"] == 2.0
+
+
+def test_build_reinforce_mix_outcomes(monkeypatch, tmp_path):
+    from ft.research import arc2
+    from ft.research.arc2 import build_reinforce_mix
+    games = [
+        {"out": 1.0, "level": 1, "oid": 1,
+         "states": [{"fen": "WIN", "history": [], "model_move": "e2e4"}]},
+        {"out": 0.0, "level": 1, "oid": 2,
+         "states": [{"fen": "BLUN", "history": [], "model_move": "e2e3"}]},
+        {"out": 0.5, "level": 2, "oid": 3,
+         "states": [{"fen": "DRAW", "history": [], "model_move": "d2d4"}]},
+    ]
+
+    def fake_score(tasks, **kw):
+        return {"BLUN": {"cp_best": 500.0, "cp_model": 0.0, "mate_best": None,
+                         "mate_model": None, "best_uci": "a1a2"}}
+
+    monkeypatch.setattr("ft.sft.poc_loop.poc_score", fake_score)
+    out = tmp_path / "mix.jsonl"
+    rows, _ = build_reinforce_mix(games, out, engine_path="sf", sf_depth=6,
+                                  sf_workers=1, cap=0)
+    by_fen = {}
+    from ft.common.serialize import jsonl_read
+    for r in jsonl_read(out):
+        by_fen.setdefault(r["key"], []).append(r)
+    win = by_fen["WIN"][0]
+    draw = by_fen["DRAW"][0]
+    blun = [r for r in by_fen["BLUN"]]
+    assert win["target"] == "e2e4" and win["weight"] == 1.0
+    assert draw["target"] == "d2d4" and draw["weight"] == 0.3
+    assert len(blun) == 1 and blun[0]["target"] == "a1a2" and blun[0]["weight"] == 1.0
+    assert rows == 3
