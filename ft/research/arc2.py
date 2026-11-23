@@ -165,9 +165,10 @@ def build_book_corpus(*, model_path: str, out_dir: Path, n_openings: int,
     print(f"corpus: {len(states)} unique states from {len(cells)} games "
           f"({time.monotonic()-t0:.0f}s); scoring at SF depth {sf_depth}...",
           flush=True)
+    from ft.research.sweep import resolve_engine
     scores = poc_score([(s["fen"], s["model_move"]) for s in states],
-                       engine_path=engine_path, depth=sf_depth,
-                       workers=sf_workers)
+                       engine_path=resolve_engine(engine_path),
+                       depth=sf_depth, workers=sf_workers)
     n_corr = 0
     for s in states:
         sc = scores.get(s["fen"], {})
