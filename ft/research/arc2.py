@@ -199,12 +199,56 @@ def train_and_eval(corpus: List[dict], *, name: str, out_dir: Path,
     from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
     t0 = time.monotonic()
     mix_path = out_dir / f"mix_{name}.jsonl"
-    n_rows, n_corr = build_mix(corpus, mix_path,
-                               rehearsal=cfg["rehearsal"], seed=42,
-                               cp_threshold=cfg.get("cp_threshold", 150.0),
-                               corr_weight=cfg.get("corr_weight", 1.0),
-                               mate_curric=cfg.get("mate_curric", 0.0),
-                               distill=cfg.get("distill", 0.0))
+    if cfg.get("impact_weight"):
+        for s in corpus:
+            sc = s.get("score") or {}
+            cb, cm = sc.get("cp_best"), sc.get("cp_model")
+            if cb is not None and cm is not None and s.get("corrected"):
+                s["weight"] = 1.0 + min(1.0, (cb - cm) / 600.0)
+    if cfg.get("level_gain"):
+        apply_level_gain(corpus, cfg["level_gain"])
+    rehearsal = cfg["rehearsal"]
+    if cfg.get("rehearsal_levels"):
+        # build_mix cannot restrict its rehearsal pool; do it here instead.
+        rehearsal = 0.0
+        n_rows_c, n_corr = build_mix(  # corrections only
+            corpus, mix_path, rehearsal=0.0, seed=42,
+            cp_threshold=cfg.get("cp_threshold", 150.0),
+            corr_weight=cfg.get("corr_weight", 1.0),
+            mate_curric=cfg.get("mate_curric", 0.0),
+            distill=cfg.get("distill", 0.0), cap=cfg.get("cap", 0))
+        from ft.common.serialize import jsonl_read
+        rows = list(jsonl_read(mix_path))
+        want = int(round(cfg["rehearsal"] * max(1, len(rows))))
+        allowed = set(cfg["rehearsal_levels"].split(","))
+        pool = [s for s in corpus if not s.get("corrected")
+                and str(s.get("level")) in allowed]
+        rng = random.Random(f"reh-lvl-{name}")
+        rng.shuffle(pool)
+        for s in pool[:want]:
+            rows.append({"bucket": "normal", "key": s["fen"],
+                         "start_fen": s["fen"], "history": s["history"],
+                         "target": s["model_move"], "weight": 1.0})
+        if cfg.get("cap") and len(rows) > cfg["cap"]:
+            rng2 = random.Random(f"cap-{name}")
+            rng2.shuffle(rows)
+            rows = rows[:cfg["cap"]]
+        jsonl_write(mix_path, rows)
+        n_rows = len(rows)
+    else:
+        n_rows, n_corr = build_mix(  # corrections + rehearsal
+            corpus, mix_path, rehearsal=rehearsal, seed=42,
+            cp_threshold=cfg.get("cp_threshold", 150.0),
+            corr_weight=cfg.get("corr_weight", 1.0),
+            mate_curric=cfg.get("mate_curric", 0.0),
+            distill=cfg.get("distill", 0.0),
+            cap=cfg.get("cap", 0))
+    if cfg.get("mirror"):
+        from ft.common.serialize import jsonl_read
+        rows = list(jsonl_read(mix_path))
+        rows = mirror_rows(rows)
+        jsonl_write(mix_path, rows)
+        n_rows = len(rows)
     done = train_candidate(
         mix_path, model_path=model_path, base_path=base_path,
         out_dir=out_dir / name, epochs=cfg.get("epochs", 2),
@@ -242,7 +286,146 @@ CONFIGS = {
     "a1": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2},      # t5 on book
     "a2": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cp_threshold": 100.0},
     "a3": {"rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 4},
+    # -- batch s: fast small-capped arms for the open loop --
+    "a1s": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000},
+    "a2s": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000, "cp_threshold": 100.0},
+    "a4s": {"rehearsal": 0.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000},
+    "b1": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000, "impact_weight": True},
+    # -- batch c: level targeting + mirror/color-symmetry augmentation --
+    # L1 has the most headroom (base 0.167 vs 0.069/0.031): upweight its
+    # corrections 3x.
+    "c1": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000,
+           "level_gain": {"1": 3.0}},
+    # Mirror (color-symmetry) augmentation: every correction row is duplicated
+    # on the vertically-mirrored board -> 2x gradient signal for free.
+    "c2": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000, "mirror": True},
+    # L1 corrections 2x + rehearsal restricted to L1 states only.
+    "c3": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000,
+           "level_gain": {"1": 2.0}, "rehearsal_levels": "1"},
+    "c4": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 16000,
+           "level_gain": {"1": 2.0}, "mirror": True},
+    # Extra rehearsal (2:1) — tests whether more non-blunder grounding helps.
+    "c5": {"rehearsal": 2.0, "kl": 0.1, "lr": 5e-5, "epochs": 2, "cap": 12000},
 }
+
+
+# -- mirror / color-symmetry augmentation --------------------------------------
+
+def _mirror_square(sq_uci: str) -> str:
+    """Mirror one UCI move on the vertical flip (rank r -> 9-r).
+
+    'e2e4' -> 'e7e5', 'a1h1' (castle short as white) -> 'a8h8', promotion
+    letters survive: 'e7e8q' -> 'e2e1q'.
+    """
+    out = []
+    for ch in sq_uci:
+        if ch.isdigit():
+            out.append(str(9 - int(ch)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _mirror_fen(fen: str) -> str:
+    # Board.mirror() = vertical flip + color swap + side-to-move flip: the
+    # exact color symmetry (same game, model takes the other color).
+    return chess.Board(fen).mirror().fen()
+
+
+def mirror_rows(rows: List[dict]) -> List[dict]:
+    """Duplicate mix rows on the vertically-mirrored (color-swapped) board.
+
+    The mirrored position of the same game state is exactly the position the
+    corpus reaches when the model takes the OTHER color against the same
+    engine — a pure symmetry of chess the tiny model has not learned. Rows
+    whose mirrored target is not legal (should not happen) are skipped.
+    """
+    out = []
+    for r in rows:
+        out.append(r)
+        try:
+            board = chess.Board(_mirror_fen(r["start_fen"]))
+        except Exception:
+            continue
+        m_target = _mirror_square(r["target"])
+        try:
+            mv = chess.Move.from_uci(m_target)
+        except Exception:
+            continue
+        if mv not in board.legal_moves:
+            continue
+        m_hist = [_mirror_square(u) for u in r["history"]]
+        out.append({"bucket": r["bucket"], "key": board.fen(),
+                    "start_fen": board.fen(), "history": m_hist,
+                    "target": m_target, "weight": r.get("weight", 1.0)})
+    return out
+
+
+def apply_level_gain(corpus: List[dict], gain: Dict[str, float]) -> None:
+    """Multiply per-state weight by level gain on corrected states only."""
+    for s in corpus:
+        if not s.get("corrected"):
+            continue
+        g = gain.get(str(s.get("level")))
+        if g is None:
+            g = gain.get("*")
+        if g is None:
+            g = gain.get("other", 1.0)
+        s["weight"] = s.get("weight", 1.0) * g
+SAFETY_MIX = "results/arc2/mix_safety.jsonl"
+
+
+def run_safety_arm(out_dir: Path, *, model_path: str, base_path: str,
+                   eval_openings: int, selfplay_games: int,
+                   eval_workers: int, eval_seed: int,
+                   records_cache: dict) -> dict:
+    """Train on the heuristic material-safety rows (+1:1 rehearsal from the
+    book corpus) with the t5 recipe; full official eval on disjoint seed."""
+    from ft.common.serialize import jsonl_read
+    import json
+    import time as _t
+    rows = list(jsonl_read(Path(SAFETY_MIX)))
+    corpus_path = out_dir / "corpus.jsonl"
+    corpus = list(jsonl_read(corpus_path))
+    n_reh = len(rows)
+    pool = [s for s in corpus if not s.get("corrected")]
+    rng = random.Random("safety-reh")
+    rng.shuffle(pool)
+    for s in pool[:n_reh]:
+        rows.append({"bucket": "normal", "key": s["fen"],
+                     "start_fen": s["fen"], "history": s["history"],
+                     "target": s["model_move"], "weight": 1.0})
+    mix_path = out_dir / "mix_s1.jsonl"
+    jsonl_write(mix_path, rows)
+    from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
+    t0 = _t.monotonic()
+    done = train_candidate(mix_path, model_path=model_path,
+                           base_path=base_path, out_dir=out_dir / "s1",
+                           epochs=2, lr=5e-5, kl=0.1, batch=128, seed=42,
+                           eval_openings=eval_openings,
+                           selfplay_games=selfplay_games,
+                           eval_workers=eval_workers,
+                           records_cache=records_cache, device="cpu")
+    mpath = done.get("final_model", "")
+    p = paired_engine_eval(mpath, base_path, levels=EVAL_LEVELS,
+                           n_openings=eval_openings, seed=eval_seed,
+                           workers=eval_workers, n_bootstrap=1000,
+                           records_cache=records_cache)
+    sl = selfplay_paired(mpath, base_path, n_games=selfplay_games,
+                         seed=eval_seed, workers=eval_workers)
+    row = {"run": "arc2/s1-safety", "config": {"rows": len(rows),
+                                               "safety_rows": n_reh},
+           "engine_delta": p["delta"], "sigma": p["sigma"],
+           "per_level": p["per_level_delta"],
+           "proxy_delta": sl["proxy_delta"],
+           "balanced": (p["delta"] + sl["proxy_delta"]) / 2.0,
+           "eval_seed": eval_seed, "elapsed_s": round(_t.monotonic() - t0)}
+    with open(Path("ft/research/results.jsonl"), "a") as f:
+        f.write(json.dumps(row, sort_keys=True) + chr(10))
+    print(f"done s1-safety: engine={row['engine_delta']:+.4f} "
+          f"proxy={row['proxy_delta']:+.4f} "
+          f"balanced={row['balanced']:+.4f}", flush=True)
+    return row
 
 
 def main() -> None:
@@ -256,6 +439,7 @@ def main() -> None:
     ap.add_argument("--scan-seed", type=str, default="scan1")
     ap.add_argument("--levels", type=int, nargs="+", default=[1, 2, 3])
     ap.add_argument("--sf-depth", type=int, default=6)
+    ap.add_argument("--batch", type=int, default=512)
     ap.add_argument("--sf-workers", type=int, default=4)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--engine", default="stockfish")
@@ -265,6 +449,7 @@ def main() -> None:
     ap.add_argument("--eval-workers", type=int, default=4)
     ap.add_argument("--eval-seed", type=int, default=1234)
     ap.add_argument("--configs", default="a1,a2,a3")
+    ap.add_argument("--safety-arm", action="store_true")
     ap.add_argument("--stage", default="all",
                     choices=["scan", "corpus", "sweep", "all"])
     args = ap.parse_args()
@@ -285,17 +470,37 @@ def main() -> None:
             levels=args.levels, sf_depth=args.sf_depth,
             sf_workers=args.sf_workers, workers=args.workers,
             engine_path=args.engine)
-    else:
-        from ft.common.serialize import jsonl_read
-        corpus = list(jsonl_read(corpus_path))
+    from ft.common.serialize import jsonl_read
+    import gc
+
+    def load_corpus():
+        return list(jsonl_read(corpus_path))
+
+    corpus = None
+    if args.stage != "sweep":
+        corpus = load_corpus()
         print(f"corpus: loaded {len(corpus)} states", flush=True)
     if args.stage == "corpus":
         return
     base_path = args.anchor_path or args.model_path
     records_cache: dict = {}
+
+    if args.safety_arm:
+        run_safety_arm(out_dir, model_path=args.model_path,
+                       base_path=base_path, eval_openings=args.eval_openings,
+                       selfplay_games=args.selfplay_games,
+                       eval_workers=args.eval_workers,
+                       eval_seed=args.eval_seed,
+                       records_cache=records_cache)
+        gc.collect()
     for name in args.configs.split(","):
+        if not name:
+            continue
+        if corpus is None:
+            corpus = load_corpus()
         cfg = dict(CONFIGS[name])
         cfg["device"] = args.device
+        cfg.setdefault("batch", args.batch)
         train_and_eval(corpus, name=name, out_dir=out_dir,
                        model_path=args.model_path, base_path=base_path,
                        cfg=cfg, eval_openings=args.eval_openings,
@@ -303,6 +508,8 @@ def main() -> None:
                        eval_workers=args.eval_workers,
                        eval_seed=args.eval_seed,
                        records_cache=records_cache)
+        corpus = None
+        gc.collect()
 
 
 if __name__ == "__main__":
