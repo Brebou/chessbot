@@ -96,24 +96,106 @@ def build_corpus(*, model_path: str, out_dir: Path, n_selfplay: int,
 
 # -- mixes ---------------------------------------------------------------------
 
+def base_move_rank(model_path: str, states: List[dict],
+                   batch: int = 512) -> dict:
+    """Rank (0-based, among *legal* moves by logit) of each state's SF best
+    move under the base model. Ranks 0..2 are decode-relevant (top-3 legal
+    decoding); flipping a rank-1/2 blunder costs the least gradient. Uses
+    FastProbePlayer's cached `_tok_ids`/`_id2tok` directly."""
+    import numpy as np
+    from chess_hw import ChessTokenizer
+    from chess_hw.model import load_model
+    from diag.fast_probe import FastProbePlayer
+
+    model = load_model(model_path, device="cpu")
+    tok = ChessTokenizer()
+    probe = FastProbePlayer(model, tok, batch_size=batch)
+    hist = [s["history"] for s in states]
+    logits = probe.last_logits(hist)
+    tok_ids = probe._tok_ids
+    out: dict = {}
+    for i, s in enumerate(states):
+        sc = s.get("score") or {}
+        best = sc.get("best_uci")
+        if not best or best not in tok_ids:
+            out[s["fen"]] = None
+            continue
+        tid = tok_ids[best]
+        row = logits[i]
+        board = chess.Board(s["fen"])
+        legal_ids = [tid2 for m in board.legal_moves
+                     for tid2 in [tok_ids.get(m.uci())] if tid2 is not None]
+        if not legal_ids:
+            out[s["fen"]] = None
+            continue
+        leg_logits = row[np.asarray(legal_ids, dtype=np.int64)]
+        rank = int((leg_logits > row[tid]).sum())
+        out[s["fen"]] = rank
+    del model, probe
+    return out
+
+
 def build_mix(corpus: List[dict], out_path: Path, *, rehearsal: float,
-              seed: int) -> tuple:
+              seed: int, cp_threshold: float = 150.0,
+              cheap_fens: Optional[set] = None, corr_weight: float = 1.0,
+              distill: float = 0.0, mate_curric: float = 0.0) -> tuple:
     """Correction rows (run7 rules) + `rehearsal`-share self-replay rows
-    (target = the model's own played move on non-blunder states)."""
+    (target = the model's own played move on non-blunder states).
+
+    Extensions:
+    - `cp_threshold`: blunder cp threshold (150 below, 100 = material
+      curriculum that also punishes skipping 1-1.5 pawn grabs).
+    - `cheap_fens`: if given, drop correction rows for states outside it
+      (decode-aware cheap flips: SF best already in base's legal top-3).
+    - `corr_weight`: per-row weight boost on correction rows.
+    - `distill`: fraction of remaining (non-correction) states used as plain
+      Stockfish best-move supervision rows (weight 1.0).
+    - `mate_curric`: if > 0, add proactive mating rows for every remaining
+      state with a forced mate in <= `mate_curric` plies (target = fastest
+      mating move), regardless of whether the model already finds it.
+    """
     rows = build_corrections(
         corpus, {s["fen"]: s["score"] for s in corpus},
-        cp_threshold=150.0, mate_piece_gate=10, quick_mate_plies=2,
+        cp_threshold=cp_threshold, mate_piece_gate=10, quick_mate_plies=2,
         mate_slack_plies=1)
-    corrected = {s["fen"] for s in corpus if s["corrected"]}
+    corrected = {r["key"] for r in rows}
+    if cheap_fens is not None:
+        rows = [r for r in rows if r["key"] in cheap_fens]
+    for r in rows:
+        r["weight"] = r.get("weight", 1.0) * corr_weight
     if rehearsal > 0:
-        pool = [s for s in corpus if not s["corrected"]]
+        pool = [s for s in corpus if s["fen"] not in corrected]
         rng = random.Random(f"rehearsal-{seed}")
         rng.shuffle(pool)
-        want = int(round(rehearsal * len(rows)))
+        want = int(round(rehearsal * max(1, len(rows))))
         for s in pool[:want]:
             rows.append({"bucket": "normal", "key": s["fen"],
                          "start_fen": s["fen"], "history": s["history"],
                          "target": s["model_move"], "weight": 1.0})
+    if distill > 0:
+        pool = [s for s in corpus if s["fen"] not in corrected]
+        rng = random.Random(f"distill-{seed}")
+        rng.shuffle(pool)
+        want = int(round(distill * len(pool)))
+        n_d = 0
+        for s in pool[:want]:
+            best = (s.get("score") or {}).get("best_uci")
+            if not best or best == s["model_move"]:
+                continue
+            rows.append({"bucket": "normal", "key": s["fen"],
+                         "start_fen": s["fen"], "history": s["history"],
+                         "target": best, "weight": 1.0})
+            n_d += 1
+    if mate_curric > 0:
+        pool = [s for s in corpus if s["fen"] not in corrected]
+        for s in pool:
+            sc = s.get("score") or {}
+            mb = sc.get("mate_best")
+            if mb is None or not (0 < mb <= mate_curric) or not sc.get("best_uci"):
+                continue
+            rows.append({"bucket": "normal", "key": s["fen"],
+                         "start_fen": s["fen"], "history": s["history"],
+                         "target": sc["best_uci"], "weight": 1.0})
     jsonl_write(out_path, rows)
     return len(rows), len(corrected)
 
@@ -188,6 +270,24 @@ CONFIGS: Dict[str, dict] = {
     "t5": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 4},
     "t6": {"rehearsal": 5.0, "kl": 0.3, "lr": 5e-5},     # very heavy replay
     "t7": {"rehearsal": 3.0, "kl": 0.3, "lr": 5e-5, "epochs": 4},
+    # -- batch u: hunting for ORDER-OF-MAGNITUDE gains (user: +0.10..0.20+) --
+    "d1": {"distill": 1.0, "rehearsal": 0.0, "kl": 0.3, "lr": 1e-4},
+    "d2": {"distill": 1.0, "corr_weight": 2.0, "rehearsal": 0.0, "kl": 0.3, "lr": 1e-4},
+    "d3": {"distill": 1.0, "corr_weight": 3.0, "rehearsal": 0.0, "kl": 0.3, "lr": 2e-4, "epochs": 4},
+    "c1": {"cheap_only": True, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4},
+    "h1": {"rehearsal": 1.0, "kl": 0.3, "lr": 2e-4, "epochs": 4},
+    "h2": {"rehearsal": 1.0, "kl": 0.3, "lr": 4e-4},
+    "m1": {"cp_threshold": 100.0, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4},
+    # -- batch n: structural hypotheses -------------------------------
+    "n1": {"rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 12},  # dose-in-steps control: 3x t5
+    "n2": {"distill": 1.0, "corr_weight": 2.0, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 6},  # everything
+    # -- batch w: pro-active winning curriculum on the big corpus --
+    "w1": {"mate_curric": 3.0, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 4},
+    "w2": {"mate_curric": 3.0, "cp_threshold": 100.0, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 4},
+    "w3": {"mate_curric": 5.0, "cp_threshold": 100.0, "corr_weight": 2.0, "rehearsal": 1.0, "kl": 0.3, "lr": 2e-4, "epochs": 4},
+    # -- batch x: generation-2 continuations (start = t5/gen1, anchor+eval = base) --
+    "x1": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 4},
+    "x2": {"mate_curric": 3.0, "cp_threshold": 100.0, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 4},
 }
 
 
@@ -211,6 +311,10 @@ def main() -> None:
                     choices=["corpus", "sweep", "all", "confirm"])
     ap.add_argument("--confirm-openings", type=int, default=20)
     ap.add_argument("--confirm-seed", type=int, default=999)
+    ap.add_argument("--anchor-path", default=None,
+                    help="override the KL anchor/eval base (generation-2+ "
+                         "continuations: start from --model-path but keep "
+                         "anchor+eval on the original base)")
     args = ap.parse_args()
     show = (lambda m, force=False: print(m, flush=True))
 
@@ -263,7 +367,8 @@ def main() -> None:
         return
 
     if args.stage in ("sweep", "all"):
-        base_path = args.model_path
+        base_path = args.anchor_path or args.model_path
+        ranks_cache = None
         records_cache: Dict[str, list] = {}
         holdout = random.Random(f"holdout-{args.seed}").sample(
             corpus, min(300, len(corpus)))
@@ -272,9 +377,19 @@ def main() -> None:
             cfg = dict(CONFIGS[name])
             t0 = time.monotonic()
             mix_path = out_dir / f"mix_{name}.jsonl"
+            if cfg.get("cheap_only") and ranks_cache is None:
+                print("computing base ranks for cheap-flip filtering...", flush=True)
+                ranks_cache = base_move_rank(base_path, corpus)
+            cheap = (None if not cfg.get("cheap_only") else
+                     {f for f, rk in ranks_cache.items() if rk is not None and rk <= 2})
             n_rows, n_corr = build_mix(corpus, mix_path,
                                        rehearsal=cfg["rehearsal"],
-                                       seed=args.seed)
+                                       seed=args.seed,
+                                       cp_threshold=cfg.get("cp_threshold", 150.0),
+                                       cheap_fens=cheap,
+                                       corr_weight=cfg.get("corr_weight", 1.0),
+                                       distill=cfg.get("distill", 0.0),
+                                       mate_curric=cfg.get("mate_curric", 0.0))
             done = train_candidate(
                 mix_path, model_path=args.model_path, base_path=base_path,
                 out_dir=out_dir / name, epochs=cfg.get("epochs", args.epochs),
