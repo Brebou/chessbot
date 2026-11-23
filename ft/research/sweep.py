@@ -288,6 +288,10 @@ CONFIGS: Dict[str, dict] = {
     # -- batch x: generation-2 continuations (start = t5/gen1, anchor+eval = base) --
     "x1": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 4},
     "x2": {"mate_curric": 3.0, "cp_threshold": 100.0, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 4},
+    # -- batch y: engine-coverage-dense corpus (400 engine games) --
+    "y1": {"rehearsal": 1.0, "kl": 0.1, "lr": 5e-5, "epochs": 4},
+    "y2": {"mate_curric": 3.0, "cp_threshold": 100.0, "rehearsal": 1.0, "kl": 0.3, "lr": 1e-4, "epochs": 4},
+    "y3": {"corr_weight": 2.0, "rehearsal": 0.5, "kl": 0.1, "lr": 1e-4, "epochs": 3},
 }
 
 
