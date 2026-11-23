@@ -101,7 +101,7 @@ def build_mix(corpus: List[dict], out_path: Path, *, rehearsal: float,
     """Correction rows (run7 rules) + `rehearsal`-share self-replay rows
     (target = the model's own played move on non-blunder states)."""
     rows = build_corrections(
-        corpus, {s["fen"]: s for s in corpus},
+        corpus, {s["fen"]: s["score"] for s in corpus},
         cp_threshold=150.0, mate_piece_gate=10, quick_mate_plies=2,
         mate_slack_plies=1)
     corrected = {s["fen"] for s in corpus if s["corrected"]}
