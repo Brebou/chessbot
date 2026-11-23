@@ -41,6 +41,22 @@ from ft.sft.train_sft import FTSFTConfig, FTSFTTrainer
 EVAL_LEVELS = (1, 2, 3)
 
 
+def resolve_engine(path: str) -> str:
+    import os
+    import shutil
+    if path != "stockfish":
+        return path
+    found = shutil.which("stockfish")
+    if found:
+        return found
+    for cand in ("~/.local/bin/stockfish", "/usr/games/stockfish",
+                 "/usr/local/bin/stockfish"):
+        p2 = os.path.expanduser(cand)
+        if os.path.exists(p2):
+            return p2
+    raise SystemExit("no Stockfish binary found; pass --engine <path>")
+
+
 # -- corpus -------------------------------------------------------------------
 
 def build_corpus(*, model_path: str, out_dir: Path, n_selfplay: int,
@@ -68,9 +84,18 @@ def build_corpus(*, model_path: str, out_dir: Path, n_selfplay: int,
                 merged[s["fen"]] = s
     states = list(merged.values())
     show(f"corpus: {len(states)} unique states, scoring at SF depth {sf_depth}...")
+    engine_path = resolve_engine(engine_path)
     scores = poc_score([(s["fen"], s["model_move"]) for s in states],
                        engine_path=engine_path, depth=sf_depth,
                        workers=sf_workers, progress=progress)
+    n_fail = sum(1 for s in states
+                 if not scores.get(s["fen"]) or
+                 not (scores.get(s["fen"]) or {}).get("best_uci"))
+    if n_fail > 0.05 * len(states):
+        raise SystemExit(
+            f"scoring failed for {n_fail}/{len(states)} states "
+            f"(engine path '{engine_path}'?) - aborting before a "
+            f"silent no-op training run")
     n_mate = n_drop = n_m1miss = 0
     drops: List[float] = []
     for s in states:
@@ -317,6 +342,8 @@ def main() -> None:
     ap.add_argument("--confirm-openings", type=int, default=20)
     ap.add_argument("--confirm-seed", type=int, default=999)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--lr", type=float, default=None,
+                    help="override all configs' learning rate")
     ap.add_argument("--rehearsal", type=float, default=None,
                     help="override all configs' rehearsal share")
     ap.add_argument("--kl", type=float, default=None,
@@ -389,6 +416,8 @@ def main() -> None:
                 cfg["rehearsal"] = args.rehearsal
             if args.kl is not None:
                 cfg["kl"] = args.kl
+            if args.lr is not None:
+                cfg["lr"] = args.lr
             t0 = time.monotonic()
             mix_path = out_dir / f"mix_{name}.jsonl"
             if cfg.get("cheap_only") and ranks_cache is None:
@@ -404,6 +433,11 @@ def main() -> None:
                                        corr_weight=cfg.get("corr_weight", 1.0),
                                        distill=cfg.get("distill", 0.0),
                                        mate_curric=cfg.get("mate_curric", 0.0))
+            if n_rows < 50:
+                raise SystemExit(
+                    f"mix for {name} has only {n_rows} rows "
+                    f"({n_corr} corrections) - corpus/scoring pipeline "
+                    f"is broken; aborting instead of training a no-op")
             done = train_candidate(
                 mix_path, model_path=args.model_path, base_path=base_path,
                 out_dir=out_dir / name, epochs=cfg.get("epochs", args.epochs),
