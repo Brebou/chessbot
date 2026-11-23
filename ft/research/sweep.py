@@ -368,7 +368,27 @@ def main() -> None:
         show = show
     else:
         corpus = list(jsonl_read(corpus_path))
-        print(f"corpus: loaded {len(corpus)} states", flush=True)
+        n_usable = sum(1 for s in corpus
+                       if (s.get("score") or {}).get("best_uci"))
+        if n_usable < 0.95 * len(corpus):
+            print(f"corpus: STALE/BROKEN (only {n_usable}/{len(corpus)} "
+                  f"states usable) - rescoring...", flush=True)
+            engine = resolve_engine(args.engine)
+            resc = poc_score([(s["fen"], s["model_move"]) for s in corpus],
+                             engine_path=engine, depth=args.sf_depth,
+                             workers=args.sf_workers)
+            for s in corpus:
+                sc = resc.get(s["fen"]) or {}
+                if sc.get("best_uci"):
+                    s["score"] = sc
+                    s["corrected"] = poc_classify(
+                        sc.get("cp_best"), sc.get("cp_model"),
+                        sc.get("mate_best"), sc.get("mate_model"),
+                        n_pieces_from_fen(s["fen"]))
+            jsonl_write(corpus_path, corpus)
+        print(f"corpus: loaded {len(corpus)} states "
+              f"({sum(1 for s in corpus if s.get('corrected'))} corrected)",
+              flush=True)
 
     if args.stage == "confirm":
         from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
