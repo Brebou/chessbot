@@ -556,6 +556,88 @@ REINFORCE_CONFIGS = {
 }
 
 
+# -- curriculum-ordering arm (batch e) ----------------------------------------
+
+def run_curriculum_arm(corpus: List[dict], out_dir: Path, *, name: str,
+                       model_path: str, base_path: str, cfg: dict,
+                       eval_openings: int, selfplay_games: int,
+                       eval_workers: int, eval_seed: int,
+                       records_cache: dict) -> dict:
+    """Two-stage ordering hypothesis, untested axis: stage 1 fixes errors
+    (corrections only, 1 epoch), stage 2 re-grounds the surviving policy
+    (own-move rehearsal from non-blunder states, 1 epoch). Compare against
+    the same data mixed together (a1s family)."""
+    import json as _json
+    from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
+    t0 = time.monotonic()
+    cap = cfg.get("cap", 12000)
+    corrected = {s["fen"] for s in corpus if s.get("corrected")}
+
+    # stage 1: corrections only
+    corr_states = [s for s in corpus if s.get("corrected")]
+    mix1 = out_dir / f"mix_{name}_s1.jsonl"
+    n_rows1, _ = build_mix(corr_states, mix1, rehearsal=0.0, seed=42,
+                           cp_threshold=cfg.get("cp_threshold", 150.0),
+                           cap=cap // 2)
+    m1_dir = out_dir / f"{name}_s1"
+    done1 = train_candidate(mix1, model_path=model_path, base_path=base_path,
+                            out_dir=m1_dir, epochs=1, lr=cfg["lr"],
+                            kl=cfg["kl"], batch=cfg.get("batch", 128),
+                            seed=42, eval_openings=eval_openings,
+                            selfplay_games=selfplay_games,
+                            eval_workers=eval_workers,
+                            records_cache={}, device=cfg.get("device", "cpu"))
+    m1 = done1.get("final_model", str(m1_dir / "final" / "model.safetensors"))
+    print(f"{name} stage1 done: corrections stage at {m1}", flush=True)
+
+    # stage 2: own-move rehearsal on non-corrected states (re-grounding)
+    pool = [s for s in corpus if s["fen"] not in corrected]
+    rng = random.Random(f"curr-{name}")
+    rng.shuffle(pool)
+    rows = []
+    for s in pool[:cap]:
+        rows.append({"bucket": "normal", "key": s["fen"],
+                     "start_fen": s["fen"], "history": s["history"],
+                     "target": s["model_move"], "weight": 1.0})
+    mix2 = out_dir / f"mix_{name}_s2.jsonl"
+    jsonl_write(mix2, rows)
+    m2_dir = out_dir / f"{name}_s2"
+    done2 = train_candidate(mix2, model_path=m1, base_path=base_path,
+                            out_dir=m2_dir, epochs=1, lr=cfg["lr"],
+                            kl=cfg["kl"], batch=cfg.get("batch", 128),
+                            seed=42, eval_openings=eval_openings,
+                            selfplay_games=selfplay_games,
+                            eval_workers=eval_workers,
+                            records_cache=records_cache)
+    mpath = done2.get("final_model", str(m2_dir / "final" / "model.safetensors"))
+    p = paired_engine_eval(mpath, base_path, levels=EVAL_LEVELS,
+                           n_openings=eval_openings, seed=eval_seed,
+                           workers=eval_workers, n_bootstrap=1000,
+                           records_cache=records_cache)
+    sl = selfplay_paired(mpath, base_path, n_games=selfplay_games,
+                         seed=eval_seed, workers=eval_workers)
+    row = {"run": f"arc2/{name}", "config": cfg, "mix_rows": cap,
+           "corrections": n_rows1, "steps": done2.get("steps"),
+           "engine_delta": p["delta"], "sigma": p["sigma"],
+           "per_level": p["per_level_delta"],
+           "proxy_delta": sl["proxy_delta"],
+           "balanced": (p["delta"] + sl["proxy_delta"]) / 2.0,
+           "eval_seed": eval_seed,
+           "elapsed_s": round(time.monotonic() - t0)}
+    with open(Path("ft/research/results.jsonl"), "a") as f:
+        f.write(_json.dumps(row, sort_keys=True) + chr(10))
+    print(f"done {name}: engine={row['engine_delta']:+.4f} "
+          f"proxy={row['proxy_delta']:+.4f} "
+          f"balanced={row['balanced']:+.4f} (sigma {row['sigma']:.4f})",
+          flush=True)
+    return row
+
+
+CURRICULUM_CONFIGS = {
+    "e1": {"cap": 12000, "kl": 0.1, "lr": 5e-5},
+}
+
+
 def run_safety_arm(out_dir: Path, *, model_path: str, base_path: str,
                    eval_openings: int, selfplay_games: int,
                    eval_workers: int, eval_seed: int,
@@ -692,6 +774,23 @@ def main() -> None:
                               eval_workers=args.eval_workers,
                               eval_seed=args.eval_seed,
                               records_cache=records_cache)
+            gc.collect()
+            continue
+        if name in CURRICULUM_CONFIGS:
+            if corpus is None:
+                corpus = load_corpus()
+            cfg = dict(CURRICULUM_CONFIGS[name])
+            cfg["device"] = args.device
+            cfg.setdefault("batch", args.batch)
+            run_curriculum_arm(corpus, out_dir, name=name,
+                               model_path=args.model_path,
+                               base_path=base_path, cfg=cfg,
+                               eval_openings=args.eval_openings,
+                               selfplay_games=args.selfplay_games,
+                               eval_workers=args.eval_workers,
+                               eval_seed=args.eval_seed,
+                               records_cache=records_cache)
+            corpus = None
             gc.collect()
             continue
         if corpus is None:
