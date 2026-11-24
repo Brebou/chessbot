@@ -402,6 +402,21 @@ def test_anchor_kl_math_and_zero_case():
     assert kl.item() > 0
 
 
+def test_freeze_last_k():
+    from ft.sft.train_sft import freeze_last_k
+    from chess_hw.model import ChessGPT
+
+    model = ChessGPT(CONFIG)
+    n_train, n_total = freeze_last_k(model, 1)
+    assert 0 < n_train < n_total
+    flags = [all(not p.requires_grad for p in b.parameters()) for b in model.h]
+    assert flags[-1] is False and all(flags[:-1])
+
+    model2 = ChessGPT(CONFIG)
+    n_train2, n_total2 = freeze_last_k(model2, len(model2.h))
+    assert n_train2 == n_total2   # k = n_layers -> everything trainable
+
+
 def test_ft_sft_config_eval_seed_default_none():
     from ft.sft.train_sft import FTSFTConfig
 
@@ -862,7 +877,10 @@ def test_build_trajectory_rows():
 
 def test_reinforce_configs_registered():
     from ft.research.arc2 import REINFORCE_CONFIGS
-    for name in ("d1", "d2", "f1", "f2", "f3", "g1", "g2"):
+    for name in ("d1", "d2", "f1", "f2", "f3", "g1", "g2",
+                 "i1", "i2", "i3"):
         assert name in REINFORCE_CONFIGS
     assert REINFORCE_CONFIGS["g1"].get("trajectory") is True
     assert REINFORCE_CONFIGS["f3"]["w_win"] == 0.0
+    assert REINFORCE_CONFIGS["i1"]["last_k"] == 1
+    assert REINFORCE_CONFIGS["i2"]["lr"] == 3e-4
