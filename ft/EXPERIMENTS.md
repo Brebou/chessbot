@@ -293,3 +293,32 @@ details don't matter at this scale. The remaining macro question is
 ITERATION (it2): do corrections compound across generations of
 self-play, or decay? it2/genN rows answer directly (engine delta vs
 base AND vs previous gen).
+
+### Batch d verdicts (REINFORCE-lite outcome weighting)
+- **d1 (win:loss:draw = 1:1:0.3, levels {1,2}): engine +0.058, proxy −0.013,
+  balanced +0.023** — best engine delta of the whole arc2 campaign, first
+  POSITIVE balanced score. Sigma 0.034 -> not yet qualifying (needs +0.068),
+  but the axis works. Notable: base wins only 15/800 games (642 losses,
+  143 draws) -> winning-game rows are scarce; the signal is dominated by
+  corrections-on-losing-games (4,921 corrections from 15,923 losing
+  states) + outcome selection. Hypothesis: dropping negative-free rows and
+  focusing corrections on games the model would otherwise LOSE (rather
+  than every blunder state) concentrates the gradient on decision-
+  relevant positions. CONFIRMATION NEXT: fresh eval seed, more openings.
+- d2 queued: L1-only, w_loss 1.5, w_draw 0 — outcome concentration test.
+
+### d1 fresh-seed confirmation
+- seed 777 (14 openings): engine **+0.042** (L1 +0.071 / L2 +0.054 / L3 0.0),
+  proxy −0.069, balanced −0.014
+- seed 555 (14 openings): engine +0.006 (L1 −0.018 / L2 +0.054 / L3 −0.018),
+  proxy −0.063
+- 3-seed mean engine delta ≈ **+0.035**, positive at L1+L2 in 2/3 seeds —
+  the gains localize exactly where the recipe trains (levels 1-2).
+  NOT seed-luck (y2 was). Proxy consistently slightly negative.
+
+### it3 (pre-registered): REINFORCE-lite ITERATED
+d1 recipe in a compounding loop (100 openings x levels {1,2} per gen,
+fresh games each gen, corrections only from losing games, 1 epoch/gen).
+- Pass: gen3 vs-base engine delta > gen1's AND per-level L1/L2 trend up.
+- Kill: gen2 vs_prev <= 0 and gen3 vs_base <= gen1 (no compounding -> the
+  recipe is a one-shot data-select, not an algorithm).
