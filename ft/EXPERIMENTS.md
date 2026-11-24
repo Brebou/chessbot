@@ -426,3 +426,42 @@ Tally across the campaign: ~30 arms in 4 recipe families, cumulative
 engine delta ~ 0. Structural facts that DID replicate: win-rows are the
 anti-collapse term (f3: corrections-only => proxy -0.10); chains decay
 after gen 2; eval-seed luck dominates single-cell results.
+
+### run13 Arm 3 (2-gen REINFORCE chain, box): banks nothing real; family closed
+- gen1: formal engine 0.000 (sigma 0.036), balanced 0.000. gen2 (on gen1):
+  internal epoch evals +0.0333 both checkpoints (L1 +0.025->+0.050, L2
+  +0.075 both) BUT formal post-eval engine -0.0083 (sigma 0.0314), proxy
+  -0.0500, balanced -0.0292. Same weights, contradictory numbers.
+- ROOT CAUSE of internal-vs-formal discrepancy (code-verified, not device):
+  trainer-internal epoch evals ran with seed=42 cells (arc2 pass-through),
+  the arm's formal eval with eval_seed=1234 cells, confirm with
+  777/888/999. Different cell sets -> different games -> deltas scatter by
+  pure sampling noise (sigma ~0.035 at 10 openings). There is NO device
+  round-off: eval workers always load models on CPU (chess_hw/match.py
+  _get_player, device="cpu"), the class engine is deterministic, and saved
+  weights are byte-identical. Same-seed same-openings evals of the same
+  weights are bitwise-reproducible.
+- FIX merged: FTSFTConfig.eval_seed (None = cfg.seed, behavior unchanged);
+  train_candidate passes it through, so trainer epoch evals now use the SAME
+  cells as the arm formal eval -> epoch-eval numbers become directly
+  comparable and no longer manufacture hope. NOTE: all run13 Arm-2/Arm-3
+  internal epoch evals printed BEFORE this fix are seed-42 cells and are NOT
+  comparable to their formal numbers.
+- Chain verdict: capped at gen 2, nothing banked. Chain decay confirmed a
+  3rd time (run10, it3, run13). REINFORCE chain axis closed pending the
+  Phase-2 3-seed confirm of results/run13/chain/gen2/d1/final (still worth
+  running: it is the only box-scale formal check of the family, and +0.033
+  twice in-seed made it the best candidate alive).
+
+### fixed g-batch verdicts (sandbox; dedupe bug fixed, rows actually emitted)
+| arm | recipe | engine | proxy | balanced | trajectory rows |
+| g1 | f1 + trajectory | -0.008 | -0.100 | -0.054 | +1626 |
+| g2 | f3 + trajectory | -0.025 | +0.013 | -0.006 | +1601 |
+The trajectory-correction axis (fix biggest 1-ply drops including last-3-plies
+setup states) is flat-to-negative with rows actually present. DEAD, replicated.
+
+### eval protocol note (binding, from the Arm-3 diagnosis)
+Never compare deltas across different eval seeds or opening counts. Campaign
+convention going forward: only confirm.py numbers (seeds 777/888/999 x 40
+openings) arbitrate promotion; epoch/formal arm numbers only rank candidates
+WITHIN the same (eval_seed, n_openings) cell set.

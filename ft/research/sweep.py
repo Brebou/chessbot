@@ -238,14 +238,15 @@ def train_candidate(mix_path: Path, *, model_path: str, base_path: str,
                     batch: int, seed: int, eval_openings: int,
                     selfplay_games: int, eval_workers: int,
                     records_cache: Dict[str, list],
-                    device: str = "cpu") -> dict:
+                    device: str = "cpu",
+                    eval_seed: Optional[int] = None) -> dict:
     cfg = FTSFTConfig(
         model_path=model_path, base_path=base_path, mix_path=str(mix_path),
         out_dir=str(out_dir), device=device, seed=seed, epochs=epochs,
         batch_size=batch, lr=lr, kl_lambda=kl, eval_mode="paired",
         eval_every_steps=0, eval_levels=EVAL_LEVELS,
         eval_n_openings=eval_openings, selfplay_games=selfplay_games,
-        eval_workers=eval_workers, plateau_patience=999)
+        eval_workers=eval_workers, plateau_patience=999, eval_seed=eval_seed)
     trainer = FTSFTTrainer(cfg)
     trainer._records_cache = records_cache
     done = trainer.train()

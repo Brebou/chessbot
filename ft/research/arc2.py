@@ -581,7 +581,7 @@ def run_reinforce_arm(out_dir: Path, *, model_path: str, base_path: str,
         kl=cfg["kl"], batch=cfg.get("batch", 128), seed=42,
         eval_openings=eval_openings, selfplay_games=selfplay_games,
         eval_workers=eval_workers, records_cache=records_cache,
-        device=cfg.get("device", "cpu"))
+        device=cfg.get("device", "cpu"), eval_seed=eval_seed)
     mpath = done.get("final_model", str(out_dir / name / "final" /
                                         "model.safetensors"))
     p = paired_engine_eval(mpath, base_path, levels=EVAL_LEVELS,
@@ -663,6 +663,7 @@ def run_curriculum_arm(corpus: List[dict], out_dir: Path, *, name: str,
                            cap=cap // 2)
     m1_dir = out_dir / f"{name}_s1"
     done1 = train_candidate(mix1, model_path=model_path, base_path=base_path,
+                            eval_seed=eval_seed,
                             out_dir=m1_dir, epochs=1, lr=cfg["lr"],
                             kl=cfg["kl"], batch=cfg.get("batch", 128),
                             seed=42, eval_openings=eval_openings,
@@ -691,6 +692,8 @@ def run_curriculum_arm(corpus: List[dict], out_dir: Path, *, name: str,
                             selfplay_games=selfplay_games,
                             eval_workers=eval_workers,
                             records_cache=records_cache)
+    # NOTE: stage-2 epoch evals still use seed-42 cells (mixed start model);
+    # the formal eval below uses eval_seed cells as before.
     mpath = done2.get("final_model", str(m2_dir / "final" / "model.safetensors"))
     p = paired_engine_eval(mpath, base_path, levels=EVAL_LEVELS,
                            n_openings=eval_openings, seed=eval_seed,
@@ -745,6 +748,7 @@ def run_safety_arm(out_dir: Path, *, model_path: str, base_path: str,
     from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
     t0 = _t.monotonic()
     done = train_candidate(mix_path, model_path=model_path,
+                           eval_seed=eval_seed,
                            base_path=base_path, out_dir=out_dir / "s1",
                            epochs=2, lr=5e-5, kl=0.1, batch=128, seed=42,
                            eval_openings=eval_openings,
