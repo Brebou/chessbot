@@ -385,3 +385,12 @@ moves keep pulling the game back into the same losing line. Path rows
 give a denser gradient on decisive games.
 - Pass: engine delta >= +0.05 at 400 games (f-caliber N).
 - Kill: < 0.
+
+### f1 verdict (2x-game dose of d1): DEAD
+1600 games at levels {1,2} (25 wins / 1249 losses / 326 draws), 9,307
+corrections from 30,648 losing states, 1 epoch over 20k rows:
+final engine 0.000, proxy -0.050, balanced -0.025.
+The games-dose axis does NOT help; d1's +0.058 does not replicate at
+2x games/1 epoch -> d1 was substantially noise + epoch-count luck.
+Batch g (trajectory corrections) chained; f2 (loss-weight 1.5),
+f3 (corrections-only) still running.
