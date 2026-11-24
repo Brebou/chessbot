@@ -414,3 +414,15 @@ collapse term; without it the model degrades its own play. d1's recipe
 mean across doses is +0.01..+0.03 engine with sigma 0.034 -> resolvable
 only at box scale with 3+ seeds (run13 Arm 2 does exactly this). g-batch
 (trajectory rows) auto-launched.
+
+### run13 Arm 2 (REINFORCE 3-seed x 600 games on box): ZERO
+Per-seed engine deltas: +0.025 / -0.025 / +0.017 (sigmas .033-.036) ->
+mean +0.006. The recipe is indistinguishable from base at 3x sandbox
+dose; the L1/L2 localization does not survive seed spread (level deltas
+scatter +/-0.1). Sandbox g-batch v1 was INVALID (dedupe bug ate every
+trajectory row: "+0 trajectory rows"); fixed (dedupe only vs corrected
+fens) and relaunched as results/arc2g.
+Tally across the campaign: ~30 arms in 4 recipe families, cumulative
+engine delta ~ 0. Structural facts that DID replicate: win-rows are the
+anti-collapse term (f3: corrections-only => proxy -0.10); chains decay
+after gen 2; eval-seed luck dominates single-cell results.

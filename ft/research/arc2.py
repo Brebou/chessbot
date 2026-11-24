@@ -512,6 +512,7 @@ def build_reinforce_mix(games: List[dict], out_path: Path, *,
                            engine_path=engine_path, depth=sf_depth,
                            workers=sf_workers)
         n_corr = 0
+        corrected_fens: set = set()
         for fen, s in uniq.items():
             sc = scores.get(fen, {})
             if not poc_classify(sc.get("cp_best"), sc.get("cp_model"),
@@ -527,14 +528,14 @@ def build_reinforce_mix(games: List[dict], out_path: Path, *,
             rows.append({"bucket": "normal", "key": fen,
                          "start_fen": fen, "history": s["history"],
                          "target": best, "weight": w_loss})
+            corrected_fens.add(fen)
             n_corr += 1
         print(f"rein: {n_corr} correction rows from {len(uniq)} losing states",
               flush=True)
         if trajectory:
-            seen = {r["key"] for r in rows}
             n_traj = build_trajectory_rows(games, rows, scores,
                                            w_loss=w_loss,
-                                           existing_fens=seen)
+                                           existing_fens=corrected_fens)
             print(f"rein: +{n_traj} trajectory (blunder-path) rows",
                   flush=True)
     rng = random.Random("rein-cap")
