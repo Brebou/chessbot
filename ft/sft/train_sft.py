@@ -104,6 +104,10 @@ class FTSFTConfig:
     selfplay_games: int = 200
     eval_workers: int = 16
     eval_bootstrap: int = 2000
+    eval_seed: Optional[int] = None   # eval cell selection; None = cfg.seed.
+                                      # Set explicitly so trainer-internal
+                                      # epoch evals use the SAME cells as the
+                                      # arm's formal eval (deltas comparable).
     # fixtures diagnostics
     fixtures_dir: str = ""
     fixtures_games: str = ""     # Phase A games jsonl; real positions for the
@@ -264,13 +268,17 @@ class FTSFTTrainer:
         cfg = self.cfg
         tag = tag.replace("/", "-")
         cand = self._save(self.ckpt_root / tag)
+        # Eval cells: use eval_seed when set so the same weights yield the
+        # same games as the arm's formal eval (eval workers load models on
+        # CPU + deterministic engine => bitwise-identical deltas).
+        eseed = cfg.eval_seed if cfg.eval_seed is not None else cfg.seed
         row: Dict = {"eval_tag": tag}
         if cfg.eval_mode == "paired":
             base_path = cfg.base_path or cfg.model_path
             t0 = time.monotonic()
             paired = paired_engine_eval(
                 str(cand), base_path, levels=cfg.eval_levels,
-                n_openings=cfg.eval_n_openings, seed=cfg.seed,
+                n_openings=cfg.eval_n_openings, seed=eseed,
                 workers=cfg.eval_workers, n_bootstrap=cfg.eval_bootstrap,
                 records_cache=self._records_cache)
             row["engine_seconds"] = time.monotonic() - t0
@@ -279,7 +287,7 @@ class FTSFTTrainer:
                     del self._records_cache[key]
             t0 = time.monotonic()
             proxy = selfplay_paired(str(cand), base_path,
-                                    n_games=cfg.selfplay_games, seed=cfg.seed,
+                                    n_games=cfg.selfplay_games, seed=eseed,
                                     workers=cfg.eval_workers)
             row["proxy_seconds"] = time.monotonic() - t0
             row["engine_delta"] = paired["delta"]

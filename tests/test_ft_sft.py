@@ -402,6 +402,16 @@ def test_anchor_kl_math_and_zero_case():
     assert kl.item() > 0
 
 
+def test_ft_sft_config_eval_seed_default_none():
+    from ft.sft.train_sft import FTSFTConfig
+
+    cfg = FTSFTConfig(model_path="m", mix_path="x", out_dir="o")
+    assert cfg.eval_seed is None          # None = fall back to cfg.seed
+    cfg2 = FTSFTConfig(model_path="m", mix_path="x", out_dir="o",
+                       eval_seed=1234)
+    assert cfg2.eval_seed == 1234
+
+
 def test_ft_loss_kl_anchor_term():
     torch.manual_seed(1)
     model = ChessGPT(CONFIG)
