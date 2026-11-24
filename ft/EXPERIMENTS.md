@@ -277,3 +277,19 @@ moves from wins find their way into future winning lines; losing
 states get real corrections. b1's failure rules out arbitrary impact
 weighting; outcome filtering is a much sharper axis (wins/losses, not
 eval gaps).
+
+### Batch c verdicts (sandbox, 10 openings, sigma ~0.03)
+| arm | recipe | engine | proxy | balanced | verdict |
+| c1  | L1 corrections x3 | −0.033 | −0.050 | −0.042 | NEGATIVE — simple L1 upweighting hurts |
+| c2  | mirror augmentation 2x rows | 0.000 | −0.038 | −0.019 | flat |
+| c3  | L1 x2 + L1-only rehearsal | +0.008 | −0.075 | −0.033 | flat engine |
+| c4  | mirror + L1 x2, cap 16k | (OOM-killed at 31k rows — memcg 4 GB; rerun with cap ≤ 20k if ever retried) | | | |
+| c5  | rehearsal dose 2.0 | −0.033 | −0.063 | −0.048 | NEGATIVE |
+| e1  | curriculum: corrections epoch -> own-move rehearsal epoch | +0.033 | −0.088 | −0.027 | best engine delta of the batch family, but proxy crushed; |not qualifying|
+Learning so far: on the book corpus every single leverage (dose,
+weighting, targeting, augmentation, ordering) is within noise or
+negative. Consistent with run9's lesson: capacity binds, recipe
+details don't matter at this scale. The remaining macro question is
+ITERATION (it2): do corrections compound across generations of
+self-play, or decay? it2/genN rows answer directly (engine delta vs
+base AND vs previous gen).

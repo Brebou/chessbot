@@ -773,6 +773,9 @@ def main() -> None:
                               selfplay_games=args.selfplay_games,
                               eval_workers=args.eval_workers,
                               eval_seed=args.eval_seed,
+                              sf_depth=cfg["sf_depth"],
+                              sf_workers=cfg["sf_workers"],
+                              engine_path=cfg["engine_path"],
                               records_cache=records_cache)
             gc.collect()
             continue
