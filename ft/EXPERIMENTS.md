@@ -394,3 +394,12 @@ The games-dose axis does NOT help; d1's +0.058 does not replicate at
 2x games/1 epoch -> d1 was substantially noise + epoch-count luck.
 Batch g (trajectory corrections) chained; f2 (loss-weight 1.5),
 f3 (corrections-only) still running.
+
+### run13 Arm 1 (run5: mix_it2 5 epochs): KILLED at box scale
+Box T4, 308k rows x up to 5 epochs, plateau-abort fired at epoch 4
+(balanced < 0.02 for 3 checkpoints): -0.031 / -0.008 / -0.031, L1 always
+negative, best_score None. The run3 sandbox "improving trend" was censored
+noise, not a trend. The off-policy SF-label corpus family (runs 1-5, 300k
+rows) is now fully closed: dose does not rescue it.
+Remaining bracket: Arm 2 (REINFORCE 3-seed x 600 games) and Arm 3
+(2-gen chain); direction set by Phase-2 confirm gate.
