@@ -322,3 +322,33 @@ fresh games each gen, corrections only from losing games, 1 epoch/gen).
 - Pass: gen3 vs-base engine delta > gen1's AND per-level L1/L2 trend up.
 - Kill: gen2 vs_prev <= 0 and gen3 vs_base <= gen1 (no compounding -> the
   recipe is a one-shot data-select, not an algorithm).
+
+## RUN10 (GPU box, executed by user): iterated t5-recipe, 5 generations
+Command: sweep --stage all --configs x1 --epochs 2 (4 eval epochs reported
+per gen) --n-selfplay 1200 --n-engine 800 --sf-depth 8, anchor = true base;
+each generation trains from the PREVIOUS generation's final model on a
+FRESH corpus of on-policy games (corpus regenerated per gen, 65-70k rows),
+paired-eval vs the TRUE BASE on a per-gen opening subset (seed varies).
+
+| gen | trained from | rows | final engine d vs base | balanced | notes |
+| 1 | base   | 70,359 | -0.0146 | -0.001 | flat; training KL drift 0.17->0.41 |
+| 2 | gen1   | 65,350 | **+0.0396** | **+0.026** | epoch-4: L1 +0.100, official mean 0.1083 vs 0.0687; sigma 0.0199 -> missed qualification by **0.0002** |
+| 3 | gen2   | 64,140 | -0.0250 | -0.015 | decay |
+| 4 | gen3   | 65,095 | +0.0104 | -0.024 | proxy -0.058 |
+| 5 | gen4   | 64,627 | -0.0521 | -0.039 | worst; L1 -0.131 |
+
+Read:
+- Generations STACK (chained weights) with fresh on-policy corpora; no
+  independent re-measure of gen2's gain on other cells yet -> CONFIRM on
+  2-3 fresh seeds (ft/research/confirm.py, eval-only, minutes).
+- gen2 gain concentrated at L1 (+0.100) — same localization as the
+  sandbox d1 REINFORCE arm (L1/L2 local +0.07/+0.05). Two independent
+  setups now agree: the winnable headroom is at level 1-2.
+- Decay after gen2 -> accumulated drift (train KL 0.4-0.53 by gen 4-5)
+  outweighs fresh corrections. Cap chains at 2 generations unless a
+  re-anchored consolidation gen is added.
+- run7's rule stands: eval-seed variance between gens can inflate a
+  single-cell delta; only multi-seed confirm counts.
+NEXT (run11 proposal): REINFORCE-lite recipe at box scale
+(corrections ONLY from losing games + own-move rows from winning games),
+from base AND from run10/gen2 as starting points.
