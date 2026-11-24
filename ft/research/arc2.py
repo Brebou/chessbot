@@ -580,7 +580,8 @@ def run_reinforce_arm(out_dir: Path, *, model_path: str, base_path: str,
         kl=cfg["kl"], batch=cfg.get("batch", 128), seed=42,
         eval_openings=eval_openings, selfplay_games=selfplay_games,
         eval_workers=eval_workers, records_cache=records_cache,
-        device=cfg.get("device", "cpu"), eval_seed=eval_seed)
+        device=cfg.get("device", "cpu"), eval_seed=eval_seed,
+        last_k_layers=cfg.get("last_k", 0))
     mpath = done.get("final_model", str(out_dir / name / "final" /
                                         "model.safetensors"))
     p = paired_engine_eval(mpath, base_path, levels=EVAL_LEVELS,
@@ -634,6 +635,20 @@ REINFORCE_CONFIGS = {
     "g2": {"games": 400, "rein_levels": [1, 2], "w_win": 0.0,
            "w_loss": 1.0, "w_draw": 0.0, "cap": 20000, "epochs": 1,
            "kl": 0.1, "lr": 5e-5, "trajectory": True},
+    # -- batch i: last-k-layer-localized FT (capacity-constrained model) --
+    # Hypothesis: with 4 layers, full-network correction drift costs more
+    # than it gains; confining updates to the final block(s) preserves the
+    # banked early-game play while the head absorbs the correction slope.
+    # Since far fewer params move, lr can rise.
+    "i1": {"games": 400, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.5, "w_draw": 0.3, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5, "last_k": 1},
+    "i2": {"games": 400, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.5, "w_draw": 0.3, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 3e-4, "last_k": 2},
+    "i3": {"games": 600, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.5, "w_draw": 0.3, "cap": 20000, "epochs": 2,
+           "kl": 0.1, "lr": 3e-4, "last_k": 1},
 }
 
 

@@ -108,6 +108,9 @@ class FTSFTConfig:
                                       # Set explicitly so trainer-internal
                                       # epoch evals use the SAME cells as the
                                       # arm's formal eval (deltas comparable).
+    last_k_layers: int = 0            # >0: freeze everything except the last k
+                                      # transformer blocks (capacity-localized
+                                      # adaptation; 0 = tune all, default).
     # fixtures diagnostics
     fixtures_dir: str = ""
     fixtures_games: str = ""     # Phase A games jsonl; real positions for the
@@ -149,6 +152,17 @@ def ce_regressed(prev: Optional[float], cur: Optional[float],
             and cur > prev * (1 + rel))
 
 
+def freeze_last_k(model: torch.nn.Module, k: int) -> tuple:
+    """Freeze all but the last k transformer blocks (tied wte/head stays
+    frozen too — embedding-wide updates drift more than they help).
+    Returns (n_trainable, n_total) parameter counts."""
+    for block in model.h[:-k]:
+        for p in block.parameters():
+            p.requires_grad_(False)
+    req = [p for p in model.parameters() if p.requires_grad]
+    return sum(p.numel() for p in req), sum(p.numel() for p in model.parameters())
+
+
 class FTSFTTrainer:
     def __init__(self, cfg: FTSFTConfig):
         self.cfg = cfg
@@ -161,6 +175,10 @@ class FTSFTTrainer:
 
         self.tokenizer = ChessTokenizer()
         self.model = load_model(cfg.model_path, device=self.device)
+        if cfg.last_k_layers > 0:
+            n_train, n_total = freeze_last_k(self.model, cfg.last_k_layers)
+            print(f"freeze: {cfg.last_k_layers}/{len(self.model.h)} blocks "
+                  f"unfrozen ({n_train} train params of {n_total})")
         self.ref_model = None
         if cfg.kl_lambda > 0:
             ref_path = cfg.base_path or cfg.model_path
@@ -168,8 +186,9 @@ class FTSFTTrainer:
             self.ref_model.eval()
             for p in self.ref_model.parameters():
                 p.requires_grad_(False)
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=cfg.lr,
-                                           weight_decay=cfg.weight_decay)
+        self.optimizer = torch.optim.AdamW(
+            (p for p in self.model.parameters() if p.requires_grad), lr=cfg.lr,
+            weight_decay=cfg.weight_decay)
         if not Path(cfg.mix_path).exists():
             sys.exit(f"❌ mix not found: {cfg.mix_path} - build it first with "
                      f"`uv run ft/pipeline.py --dataset <lichess dump> ...`")
