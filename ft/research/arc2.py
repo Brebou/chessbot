@@ -909,6 +909,13 @@ def main() -> None:
             corpus = None
             gc.collect()
             continue
+        if name not in CONFIGS:
+            known = sorted(set(CONFIGS) | set(REINFORCE_CONFIGS)
+                           | set(CURRICULUM_CONFIGS))
+            raise SystemExit(
+                f"\u274c unknown config '{name}'. Known: {', '.join(known)}. "
+                f"If you expect it to exist, you are on an old checkout - "
+                f"merge/pull the latest main first.")
         if corpus is None:
             corpus = load_corpus()
         cfg = dict(CONFIGS[name])
