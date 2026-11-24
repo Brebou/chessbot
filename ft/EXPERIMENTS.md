@@ -465,3 +465,15 @@ Never compare deltas across different eval seeds or opening counts. Campaign
 convention going forward: only confirm.py numbers (seeds 777/888/999 x 40
 openings) arbitrate promotion; epoch/formal arm numbers only rank candidates
 WITHIN the same (eval_seed, n_openings) cell set.
+
+### soup arm (h-batch): weight-average of closed REINFORCE finals — ZERO
+Soup s1 = uniform mean of {d1, f2, g1, g2} finals (all base-anchored, same
+basin). 10-opening cells: engine -0.017 with L1 +0.10 spike (mirrors single
+arms). WiSE-FT blend with base 0.5 (s2) flattens the spike: -0.008, dead.
+3-seed 40-opening confirm of s1: +0.031 / -0.017 / +0.002 -> mean +0.005,
+qualifies=false all seeds, proxy -0.035/-0.030/-0.020 on all seeds.
+Verdict: averaging flat arms gives flat; the L1 spike was averaging luck,
+not signal. Direction DEAD. (Code: ft/research/soup.py.)
+Also: run14 sandbox prototype OOM-killed once (22 SF workers @ depth 12 +
+concurrent soup evals breached the 4 GB cgroup); relaunched at 12 workers.
+Lesson: sandbox concurrency budget = ONE heavy job at a time.
