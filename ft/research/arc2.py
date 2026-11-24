@@ -379,6 +379,7 @@ SAFETY_MIX = "results/arc2/mix_safety.jsonl"
 
 def collect_outcome_games(model_path: str, oids: List[int], levels: List[int],
                           *, seed_tag: str = "rein", max_plies: int = MAX_PLY,
+                          device: str = "cpu",
                           ) -> List[dict]:
     """Play the CURRENT policy vs the class engine (both colors) and keep
     per-model-move states WITH the game outcome, so rows can be weighted by
@@ -389,7 +390,7 @@ def collect_outcome_games(model_path: str, oids: List[int], levels: List[int],
     from chess_hw import ChessTokenizer
     from chess_hw.model import load_model
 
-    model = load_model(model_path, device="cpu")
+    model = load_model(model_path, device=device)
     probe = FastProbePlayer(model, ChessTokenizer(), batch_size=256)
     probe.name = "arc2-rein"
     book = load_openings()
@@ -558,9 +559,11 @@ def run_reinforce_arm(out_dir: Path, *, model_path: str, base_path: str,
     name = cfg.get("name", "d1")
     t0 = time.monotonic()
     engine_path = resolve_engine(engine_path)
-    oids = _select_oids(f"rein-{name}", cfg.get("games", 200))
+    oids = _select_oids(cfg.get("rein_seed", f"rein-{name}"),
+                        cfg.get("games", 200))
     games = collect_outcome_games(model_path, oids,
-                                  cfg.get("rein_levels", [1, 2]))
+                                  cfg.get("rein_levels", [1, 2]),
+                                  device=cfg.get("rein_device", "cpu"))
     n_win = sum(1 for g in games if g["out"] == 1.0)
     n_loss = sum(1 for g in games if g["out"] == 0.0)
     print(f"rein games: {len(games)} total, {n_win} wins, {n_loss} losses, "
@@ -790,6 +793,14 @@ def main() -> None:
     ap.add_argument("--eval-workers", type=int, default=4)
     ap.add_argument("--eval-seed", type=int, default=1234)
     ap.add_argument("--configs", default="a1,a2,a3")
+    ap.add_argument("--reinforce-games", type=int, default=None,
+                    help="override the d-arm game count (d1/d2 default 200)")
+    ap.add_argument("--reinforce-device", default="cpu",
+                    help="device for the outcome-game collector (cuda on "
+                         "the GPU box)")
+    ap.add_argument("--reinforce-seed", default=None,
+                    help="override the d-arm opening-set seed (vary per "
+                         "generation for fresh cells)")
     ap.add_argument("--safety-arm", action="store_true")
     ap.add_argument("--stage", default="all",
                     choices=["scan", "corpus", "sweep", "all"])
@@ -845,6 +856,11 @@ def main() -> None:
             cfg["engine_path"] = args.engine
             cfg["sf_depth"] = args.sf_depth
             cfg["sf_workers"] = args.sf_workers
+            if args.reinforce_games is not None:
+                cfg["games"] = args.reinforce_games
+            if args.reinforce_seed is not None:
+                cfg["rein_seed"] = args.reinforce_seed
+            cfg["rein_device"] = args.reinforce_device
             run_reinforce_arm(out_dir, model_path=args.model_path,
                               base_path=base_path, cfg=cfg,
                               eval_openings=args.eval_openings,
