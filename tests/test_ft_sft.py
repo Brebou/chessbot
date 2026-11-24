@@ -734,3 +734,86 @@ def test_dagger_emit_pairs_makes_contrastive_rows(tiny_model, tmp_path):
     for r in pairs:
         assert r["bad"] != r["target"]
         chess.Board(r["key"]).parse_uci(r["bad"])
+
+
+def test_arc2_mirror_symmetry():
+    from ft.research.arc2 import _mirror_fen, _mirror_square, mirror_rows
+
+    # start position is its own mirror
+    assert _mirror_fen(chess.STARTING_FEN).split()[0] == \
+        'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR'
+    assert _mirror_square('e2e4') == 'e7e5'
+    assert _mirror_square('a1h1') == 'a8h8'
+    assert _mirror_square('e7e8q') == 'e2e1q'
+    # color symmetry: a real position + legal move mirrors to a mirrored
+    # position where the mirrored move is legal
+    fen = "r1bqk2r/ppppbppp/2n2n2/4p1N1/2B1P3/8/PPPP1PPP/RNBQK2R w KQkq - 6 5"
+    board = chess.Board(fen)
+    legals = list(board.legal_moves)
+    target = next(str(m) for m in legals if board.piece_type_at(m.from_square)
+                  == chess.KNIGHT)
+    rows = [{"bucket": "normal", "key": fen, "start_fen": fen,
+             "history": ["e2e4", "e7e5", "g1f3", "b8c6"], "target": target,
+             "weight": 1.0}]
+    out = mirror_rows(rows)
+    assert len(out) == 2
+    mf = chess.Board(out[1]["start_fen"])
+    mv = chess.Move.from_uci(out[1]["target"])
+    assert mv in mf.legal_moves
+    # side to move flipped to the other color
+    assert out[0]["start_fen"].split()[1] != out[1]["start_fen"].split()[1]
+    assert out[1]["weight"] == 1.0
+
+
+def test_arc2_level_gain():
+    from ft.research.arc2 import apply_level_gain
+    corpus = [
+        {"fen": "A", "corrected": True, "level": 1},
+        {"fen": "B", "corrected": True, "level": 3},
+        {"fen": "C", "corrected": False, "level": 1},
+        {"fen": "D", "corrected": True, "level": 2},
+    ]
+    apply_level_gain(corpus, {"1": 3.0})
+    # corrected states on level 1 get the gain; everything else untouched
+    assert corpus[0].get("weight") == 3.0
+    assert corpus[1].get("weight", 1.0) == 1.0
+    assert corpus[3].get("weight", 1.0) == 1.0
+    assert "weight" not in corpus[2]
+
+    apply_level_gain(corpus, {"*": 2.0})
+    assert corpus[0]["weight"] == 6.0  # multiplies existing weight
+    assert corpus[1]["weight"] == 2.0
+    assert corpus[3]["weight"] == 2.0
+
+
+def test_build_reinforce_mix_outcomes(monkeypatch, tmp_path):
+    from ft.research import arc2
+    from ft.research.arc2 import build_reinforce_mix
+    games = [
+        {"out": 1.0, "level": 1, "oid": 1,
+         "states": [{"fen": "WIN", "history": [], "model_move": "e2e4"}]},
+        {"out": 0.0, "level": 1, "oid": 2,
+         "states": [{"fen": "BLUN", "history": [], "model_move": "e2e3"}]},
+        {"out": 0.5, "level": 2, "oid": 3,
+         "states": [{"fen": "DRAW", "history": [], "model_move": "d2d4"}]},
+    ]
+
+    def fake_score(tasks, **kw):
+        return {"BLUN": {"cp_best": 500.0, "cp_model": 0.0, "mate_best": None,
+                         "mate_model": None, "best_uci": "a1a2"}}
+
+    monkeypatch.setattr("ft.sft.poc_loop.poc_score", fake_score)
+    out = tmp_path / "mix.jsonl"
+    rows, _ = build_reinforce_mix(games, out, engine_path="sf", sf_depth=6,
+                                  sf_workers=1, cap=0)
+    by_fen = {}
+    from ft.common.serialize import jsonl_read
+    for r in jsonl_read(out):
+        by_fen.setdefault(r["key"], []).append(r)
+    win = by_fen["WIN"][0]
+    draw = by_fen["DRAW"][0]
+    blun = [r for r in by_fen["BLUN"]]
+    assert win["target"] == "e2e4" and win["weight"] == 1.0
+    assert draw["target"] == "d2d4" and draw["weight"] == 0.3
+    assert len(blun) == 1 and blun[0]["target"] == "a1a2" and blun[0]["weight"] == 1.0
+    assert rows == 3

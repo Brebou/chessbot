@@ -163,7 +163,8 @@ def base_move_rank(model_path: str, states: List[dict],
 def build_mix(corpus: List[dict], out_path: Path, *, rehearsal: float,
               seed: int, cp_threshold: float = 150.0,
               cheap_fens: Optional[set] = None, corr_weight: float = 1.0,
-              distill: float = 0.0, mate_curric: float = 0.0) -> tuple:
+              distill: float = 0.0, mate_curric: float = 0.0,
+              cap: int = 0) -> tuple:
     """Correction rows (run7 rules) + `rehearsal`-share self-replay rows
     (target = the model's own played move on non-blunder states).
 
@@ -186,8 +187,9 @@ def build_mix(corpus: List[dict], out_path: Path, *, rehearsal: float,
     corrected = {r["key"] for r in rows}
     if cheap_fens is not None:
         rows = [r for r in rows if r["key"] in cheap_fens]
+    weights_by_fen = {s["fen"]: s.get("weight") or 1.0 for s in corpus}
     for r in rows:
-        r["weight"] = r.get("weight", 1.0) * corr_weight
+        r["weight"] = r.get("weight", 1.0) * corr_weight * weights_by_fen.get(r["key"], 1.0)
     if rehearsal > 0:
         pool = [s for s in corpus if s["fen"] not in corrected]
         rng = random.Random(f"rehearsal-{seed}")
@@ -221,6 +223,10 @@ def build_mix(corpus: List[dict], out_path: Path, *, rehearsal: float,
             rows.append({"bucket": "normal", "key": s["fen"],
                          "start_fen": s["fen"], "history": s["history"],
                          "target": sc["best_uci"], "weight": 1.0})
+    if cap and len(rows) > cap:
+        rng = random.Random(f"cap-{seed}")
+        rng.shuffle(rows)
+        rows = rows[:cap]
     jsonl_write(out_path, rows)
     return len(rows), len(corrected)
 
@@ -452,7 +458,8 @@ def main() -> None:
                                        cheap_fens=cheap,
                                        corr_weight=cfg.get("corr_weight", 1.0),
                                        distill=cfg.get("distill", 0.0),
-                                       mate_curric=cfg.get("mate_curric", 0.0))
+                                       mate_curric=cfg.get("mate_curric", 0.0),
+                                       cap=cfg.get("cap", 0))
             if n_rows < 50:
                 raise SystemExit(
                     f"mix for {name} has only {n_rows} rows "

@@ -242,3 +242,113 @@ at 10-20x sandbox scale (fresh 30k-50k games/gen, SF depth 8 labels,
 KL 0.1, lr 5e-5, 2 ep, corrections+rehearsal 1:1, generation models
 accumulating); qualification only on fresh-seed 40-opening + 200-game
 cells. Sandbox confirms +0.017 is the floor to beat.
+
+## ARC2 (open-loop, sandbox): book-aligned on-policy corrections — verdict so far
+The official eval plays paired games from a 31,369-entry bundled opening
+book; previous corpora sampled random opening plies (distribution
+mismatch). Summary of the runs so far (sandbox 10-20 openings, 20
+self-play games; sigma ~0.03):
+
+| arm | recipe | engine | proxy | balanced | verdict |
+| s1   | heuristic safety corpus + rehearsal | +0.0083 | −0.025 | −0.008 | flat, no engine gain |
+| a1   | t5 on book corpus (full) | +0.0083 | +0.025 | +0.017 | marginal |
+| a2   | cp_threshold 100 | +0.0083 | −0.050 | −0.021 | flat |
+| a3   | kl 0.3, lr 1e-4 | +0.0083 | −0.050 | −0.021 | flat |
+| y2   | mate_curric 3.0 + cp 100 + kl 0.3 | +0.0417 | −0.0625 | −0.010 | best engine seen, but noisy; confirm failed on fresh seed (−0.018) |
+| t5   | (run9 survivor) | +0.0042 | 0.0 | +0.002 | confirm on fresh seed 555: +0.004/-0.008 — floor, not a win |
+| b1   | + impact_weight by eval gap | −0.0167 | −0.075 | −0.046 | NEGATIVE — impact weighting hurts (overweights rare cascades) |
+
+### Batch c (pre-registered, queued behind b-batch)
+- **c1**: L1 correction upweight x3 (base headroom is at L1: 0.167 vs 0.069/0.031). Pass: engine delta ≥ +0.04. Kill: negative.
+- **c2**: mirror/color-symmetry augmentation (every row duplicated on `Board.mirror()`). Free 2x data. Pass: delta ≥ +0.03 at same step count.
+- **c3**: L1-gain x2 + rehearsal restricted to L1 states only.
+- **c4**: mirror + L1-gain combo at cap 16k.
+- **c5**: rehearsal dose 2.0 (tests dose–response of grounding rows).
+
+### Batch d (pre-registered, REINFORCE-lite outcome weighting)
+Fresh book games vs the class engine per arm (never reused): WINNING
+games -> CE rows pushing UP the model's own played moves (w_win);
+LOSING games -> CE rows to the SF best move when the played move was a
+blunder (w_loss), else low-weight own-move rows; DRAWS -> w_draw.
+- **d1**: win:loss:draw = 1 : 1 : 0.3, levels {1,2}; **d2**: levels {1} only, w_loss 1.5, w_draw 0.
+- Pass: engine delta ≥ +0.04. Kill: negative engine delta.
+Rationale: outcome selection is the policy-gradient surrogate — own
+moves from wins find their way into future winning lines; losing
+states get real corrections. b1's failure rules out arbitrary impact
+weighting; outcome filtering is a much sharper axis (wins/losses, not
+eval gaps).
+
+### Batch c verdicts (sandbox, 10 openings, sigma ~0.03)
+| arm | recipe | engine | proxy | balanced | verdict |
+| c1  | L1 corrections x3 | −0.033 | −0.050 | −0.042 | NEGATIVE — simple L1 upweighting hurts |
+| c2  | mirror augmentation 2x rows | 0.000 | −0.038 | −0.019 | flat |
+| c3  | L1 x2 + L1-only rehearsal | +0.008 | −0.075 | −0.033 | flat engine |
+| c4  | mirror + L1 x2, cap 16k | (OOM-killed at 31k rows — memcg 4 GB; rerun with cap ≤ 20k if ever retried) | | | |
+| c5  | rehearsal dose 2.0 | −0.033 | −0.063 | −0.048 | NEGATIVE |
+| e1  | curriculum: corrections epoch -> own-move rehearsal epoch | +0.033 | −0.088 | −0.027 | best engine delta of the batch family, but proxy crushed; |not qualifying|
+Learning so far: on the book corpus every single leverage (dose,
+weighting, targeting, augmentation, ordering) is within noise or
+negative. Consistent with run9's lesson: capacity binds, recipe
+details don't matter at this scale. The remaining macro question is
+ITERATION (it2): do corrections compound across generations of
+self-play, or decay? it2/genN rows answer directly (engine delta vs
+base AND vs previous gen).
+
+### Batch d verdicts (REINFORCE-lite outcome weighting)
+- **d1 (win:loss:draw = 1:1:0.3, levels {1,2}): engine +0.058, proxy −0.013,
+  balanced +0.023** — best engine delta of the whole arc2 campaign, first
+  POSITIVE balanced score. Sigma 0.034 -> not yet qualifying (needs +0.068),
+  but the axis works. Notable: base wins only 15/800 games (642 losses,
+  143 draws) -> winning-game rows are scarce; the signal is dominated by
+  corrections-on-losing-games (4,921 corrections from 15,923 losing
+  states) + outcome selection. Hypothesis: dropping negative-free rows and
+  focusing corrections on games the model would otherwise LOSE (rather
+  than every blunder state) concentrates the gradient on decision-
+  relevant positions. CONFIRMATION NEXT: fresh eval seed, more openings.
+- d2 queued: L1-only, w_loss 1.5, w_draw 0 — outcome concentration test.
+
+### d1 fresh-seed confirmation
+- seed 777 (14 openings): engine **+0.042** (L1 +0.071 / L2 +0.054 / L3 0.0),
+  proxy −0.069, balanced −0.014
+- seed 555 (14 openings): engine +0.006 (L1 −0.018 / L2 +0.054 / L3 −0.018),
+  proxy −0.063
+- 3-seed mean engine delta ≈ **+0.035**, positive at L1+L2 in 2/3 seeds —
+  the gains localize exactly where the recipe trains (levels 1-2).
+  NOT seed-luck (y2 was). Proxy consistently slightly negative.
+
+### it3 (pre-registered): REINFORCE-lite ITERATED
+d1 recipe in a compounding loop (100 openings x levels {1,2} per gen,
+fresh games each gen, corrections only from losing games, 1 epoch/gen).
+- Pass: gen3 vs-base engine delta > gen1's AND per-level L1/L2 trend up.
+- Kill: gen2 vs_prev <= 0 and gen3 vs_base <= gen1 (no compounding -> the
+  recipe is a one-shot data-select, not an algorithm).
+
+## RUN10 (GPU box, executed by user): iterated t5-recipe, 5 generations
+Command: sweep --stage all --configs x1 --epochs 2 (4 eval epochs reported
+per gen) --n-selfplay 1200 --n-engine 800 --sf-depth 8, anchor = true base;
+each generation trains from the PREVIOUS generation's final model on a
+FRESH corpus of on-policy games (corpus regenerated per gen, 65-70k rows),
+paired-eval vs the TRUE BASE on a per-gen opening subset (seed varies).
+
+| gen | trained from | rows | final engine d vs base | balanced | notes |
+| 1 | base   | 70,359 | -0.0146 | -0.001 | flat; training KL drift 0.17->0.41 |
+| 2 | gen1   | 65,350 | **+0.0396** | **+0.026** | epoch-4: L1 +0.100, official mean 0.1083 vs 0.0687; sigma 0.0199 -> missed qualification by **0.0002** |
+| 3 | gen2   | 64,140 | -0.0250 | -0.015 | decay |
+| 4 | gen3   | 65,095 | +0.0104 | -0.024 | proxy -0.058 |
+| 5 | gen4   | 64,627 | -0.0521 | -0.039 | worst; L1 -0.131 |
+
+Read:
+- Generations STACK (chained weights) with fresh on-policy corpora; no
+  independent re-measure of gen2's gain on other cells yet -> CONFIRM on
+  2-3 fresh seeds (ft/research/confirm.py, eval-only, minutes).
+- gen2 gain concentrated at L1 (+0.100) — same localization as the
+  sandbox d1 REINFORCE arm (L1/L2 local +0.07/+0.05). Two independent
+  setups now agree: the winnable headroom is at level 1-2.
+- Decay after gen2 -> accumulated drift (train KL 0.4-0.53 by gen 4-5)
+  outweighs fresh corrections. Cap chains at 2 generations unless a
+  re-anchored consolidation gen is added.
+- run7's rule stands: eval-seed variance between gens can inflate a
+  single-cell delta; only multi-seed confirm counts.
+NEXT (run11 proposal): REINFORCE-lite recipe at box scale
+(corrections ONLY from losing games + own-move rows from winning games),
+from base AND from run10/gen2 as starting points.
