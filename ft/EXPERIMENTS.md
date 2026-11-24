@@ -394,3 +394,74 @@ The games-dose axis does NOT help; d1's +0.058 does not replicate at
 2x games/1 epoch -> d1 was substantially noise + epoch-count luck.
 Batch g (trajectory corrections) chained; f2 (loss-weight 1.5),
 f3 (corrections-only) still running.
+
+### run13 Arm 1 (run5: mix_it2 5 epochs): KILLED at box scale
+Box T4, 308k rows x up to 5 epochs, plateau-abort fired at epoch 4
+(balanced < 0.02 for 3 checkpoints): -0.031 / -0.008 / -0.031, L1 always
+negative, best_score None. The run3 sandbox "improving trend" was censored
+noise, not a trend. The off-policy SF-label corpus family (runs 1-5, 300k
+rows) is now fully closed: dose does not rescue it.
+Remaining bracket: Arm 2 (REINFORCE 3-seed x 600 games) and Arm 3
+(2-gen chain); direction set by Phase-2 confirm gate.
+
+### batch f verdicts (sandbox, 400 openings = 1600 games/level-pair)
+| arm | recipe | engine | proxy | balanced | verdict |
+| f1 | d1 @ 2x games, 1 ep | 0.000 | -0.050 | -0.025 | games-dose dead |
+| f2 | d1 + w_loss 1.5 | +0.033 | -0.025 | **+0.004** | only non-negative balanced |
+| f3 | corrections only (no win/draw rows) | +0.017 | -0.100 | -0.042 | corrections alone CRUSH self-play coherence |
+Reading: the win-row leg (pushing up own moves in won games) is the anti-
+collapse term; without it the model degrades its own play. d1's recipe
+mean across doses is +0.01..+0.03 engine with sigma 0.034 -> resolvable
+only at box scale with 3+ seeds (run13 Arm 2 does exactly this). g-batch
+(trajectory rows) auto-launched.
+
+### run13 Arm 2 (REINFORCE 3-seed x 600 games on box): ZERO
+Per-seed engine deltas: +0.025 / -0.025 / +0.017 (sigmas .033-.036) ->
+mean +0.006. The recipe is indistinguishable from base at 3x sandbox
+dose; the L1/L2 localization does not survive seed spread (level deltas
+scatter +/-0.1). Sandbox g-batch v1 was INVALID (dedupe bug ate every
+trajectory row: "+0 trajectory rows"); fixed (dedupe only vs corrected
+fens) and relaunched as results/arc2g.
+Tally across the campaign: ~30 arms in 4 recipe families, cumulative
+engine delta ~ 0. Structural facts that DID replicate: win-rows are the
+anti-collapse term (f3: corrections-only => proxy -0.10); chains decay
+after gen 2; eval-seed luck dominates single-cell results.
+
+### run13 Arm 3 (2-gen REINFORCE chain, box): banks nothing real; family closed
+- gen1: formal engine 0.000 (sigma 0.036), balanced 0.000. gen2 (on gen1):
+  internal epoch evals +0.0333 both checkpoints (L1 +0.025->+0.050, L2
+  +0.075 both) BUT formal post-eval engine -0.0083 (sigma 0.0314), proxy
+  -0.0500, balanced -0.0292. Same weights, contradictory numbers.
+- ROOT CAUSE of internal-vs-formal discrepancy (code-verified, not device):
+  trainer-internal epoch evals ran with seed=42 cells (arc2 pass-through),
+  the arm's formal eval with eval_seed=1234 cells, confirm with
+  777/888/999. Different cell sets -> different games -> deltas scatter by
+  pure sampling noise (sigma ~0.035 at 10 openings). There is NO device
+  round-off: eval workers always load models on CPU (chess_hw/match.py
+  _get_player, device="cpu"), the class engine is deterministic, and saved
+  weights are byte-identical. Same-seed same-openings evals of the same
+  weights are bitwise-reproducible.
+- FIX merged: FTSFTConfig.eval_seed (None = cfg.seed, behavior unchanged);
+  train_candidate passes it through, so trainer epoch evals now use the SAME
+  cells as the arm formal eval -> epoch-eval numbers become directly
+  comparable and no longer manufacture hope. NOTE: all run13 Arm-2/Arm-3
+  internal epoch evals printed BEFORE this fix are seed-42 cells and are NOT
+  comparable to their formal numbers.
+- Chain verdict: capped at gen 2, nothing banked. Chain decay confirmed a
+  3rd time (run10, it3, run13). REINFORCE chain axis closed pending the
+  Phase-2 3-seed confirm of results/run13/chain/gen2/d1/final (still worth
+  running: it is the only box-scale formal check of the family, and +0.033
+  twice in-seed made it the best candidate alive).
+
+### fixed g-batch verdicts (sandbox; dedupe bug fixed, rows actually emitted)
+| arm | recipe | engine | proxy | balanced | trajectory rows |
+| g1 | f1 + trajectory | -0.008 | -0.100 | -0.054 | +1626 |
+| g2 | f3 + trajectory | -0.025 | +0.013 | -0.006 | +1601 |
+The trajectory-correction axis (fix biggest 1-ply drops including last-3-plies
+setup states) is flat-to-negative with rows actually present. DEAD, replicated.
+
+### eval protocol note (binding, from the Arm-3 diagnosis)
+Never compare deltas across different eval seeds or opening counts. Campaign
+convention going forward: only confirm.py numbers (seeds 777/888/999 x 40
+openings) arbitrate promotion; epoch/formal arm numbers only rank candidates
+WITHIN the same (eval_seed, n_openings) cell set.
