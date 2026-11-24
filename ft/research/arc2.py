@@ -553,6 +553,19 @@ REINFORCE_CONFIGS = {
            "kl": 0.1, "lr": 5e-5},
     "d2": {"games": 200, "rein_levels": [1], "w_win": 1.0, "w_loss": 1.5,
            "w_draw": 0.0, "cap": 12000, "epochs": 2, "kl": 0.1, "lr": 5e-5},
+    # -- batch f: sandbox dose-response on the d1 recipe --
+    # f1: same recipe, 2x games (does the d-signal grow with games N?)
+    "f1": {"games": 400, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.0, "w_draw": 0.3, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5},
+    # f2: heavier loss weight (1.5x corrections on losing games)
+    "f2": {"games": 400, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.5, "w_draw": 0.3, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5},
+    # f3: pure corrections (no win/draw rows) — isolates the correction leg
+    "f3": {"games": 400, "rein_levels": [1, 2], "w_win": 0.0,
+           "w_loss": 1.0, "w_draw": 0.0, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5},
 }
 
 

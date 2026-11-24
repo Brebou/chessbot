@@ -352,3 +352,17 @@ Read:
 NEXT (run11 proposal): REINFORCE-lite recipe at box scale
 (corrections ONLY from losing games + own-move rows from winning games),
 from base AND from run10/gen2 as starting points.
+
+### it3 chain: does REINFORCE-iteration compound in the sandbox? NO.
+- gen1 (vs base): engine +0.008 (L1 +0.075)
+- gen2 (vs gen1): engine -0.0417 (vs_prev -0.0417) -> regression
+Same shape as run10 on the box: one lucky step then decay. Standing
+conclusion: ITERATION DOES NOT COMPOUND for chains > 2 gens. The recipe
+family (corrections+KL) extracts a one-shot fix and then drift wins.
+Remaining research axes with headroom:
+1. f-batch (sandbox, dose-response of the d1 recipe at 400 games:
+   f1 games-dose, f2 loss-weight, f3 corrections-only) -> informs run11/12
+   starting-point choice.
+2. run11 (box): d1 recipe at 600 games from run10/gen2.
+3. run12 (box): it3 chain at 600 games/gen but STOP at gen2.
+All gated on the confirm tool: no promotion without 3-seed confirmation.
