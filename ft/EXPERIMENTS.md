@@ -366,3 +366,22 @@ Remaining research axes with headroom:
 2. run11 (box): d1 recipe at 600 games from run10/gen2.
 3. run12 (box): it3 chain at 600 games/gen but STOP at gen2.
 All gated on the confirm tool: no promotion without 3-seed confirmation.
+
+### it3 FINAL (chain complete): no compounding, chain ends below base
+gen1 (+0.008 w/ L1 +0.075) -> gen2 (-0.042) -> gen3 (vs prev +0.017,
+vs base -0.025). Combined with the box's run10 (gen1 flat -> gen2 luck
+-> gen3-5 decay): correcting on fresh on-policy games is a ONE-SHOT
+extract; iterating the chain drifts below base by gen 2-3 in both
+recipes (t5-iterated and REINFORCE-iterated). Rules out the whole
+"self-improvement loop" family at this model scale.
+
+### batch g (pre-registered): trajectory (blunder-path) corrections
+For each losing game, locate the largest one-ply drop (cp_best -
+cp_model) and correct up to the 3 preceding model moves as well
+(target = SF best at each state, weight 0.25 x w_loss, deduped against
+regular rows). g1 = f1 + trajectory; g2 = trajectory-only corrections.
+Rationale: single-position CE corrects the TIPPING move; the setup
+moves keep pulling the game back into the same losing line. Path rows
+give a denser gradient on decisive games.
+- Pass: engine delta >= +0.05 at 400 games (f-caliber N).
+- Kill: < 0.
