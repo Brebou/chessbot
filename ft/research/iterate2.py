@@ -63,9 +63,10 @@ def main() -> None:
             corpus = list(jsonl_read(raw_path))
             print(f"corpus: loaded {len(corpus)} states from disk", flush=True)
         else:
-            corpus = collect_book_corpus(policy, oids, args.levels, workers=1)
+            raw, _cells = collect_book_corpus(policy, oids, args.levels,
+                                              workers=1)
             merged: dict = {}
-            for s in corpus:
+            for s in raw:
                 merged.setdefault(s["fen"], s)
             corpus = list(merged.values())
             scores_done = out_dir / f".scores_gen{gen}"

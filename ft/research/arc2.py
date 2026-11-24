@@ -712,6 +712,9 @@ def main() -> None:
     ap.add_argument("--eval-workers", type=int, default=4)
     ap.add_argument("--eval-seed", type=int, default=1234)
     ap.add_argument("--configs", default="a1,a2,a3")
+    ap.add_argument("--reinforce-games", type=int, default=None,
+                    help="override the d-arm game count (REINFORCE_CONFIGS "
+                         "d1/d2 default 200)")
     ap.add_argument("--safety-arm", action="store_true")
     ap.add_argument("--stage", default="all",
                     choices=["scan", "corpus", "sweep", "all"])
@@ -762,6 +765,8 @@ def main() -> None:
         if name in REINFORCE_CONFIGS:
             cfg = dict(REINFORCE_CONFIGS[name])
             cfg["name"] = name
+            if args.reinforce_games is not None:
+                cfg["games"] = args.reinforce_games
             cfg["device"] = args.device
             cfg.setdefault("batch", args.batch)
             cfg["engine_path"] = args.engine

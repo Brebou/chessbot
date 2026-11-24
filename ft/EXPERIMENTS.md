@@ -352,3 +352,27 @@ Read:
 NEXT (run11 proposal): REINFORCE-lite recipe at box scale
 (corrections ONLY from losing games + own-move rows from winning games),
 from base AND from run10/gen2 as starting points.
+
+### run10/gen2 CONFIRMATION: KILLED (2026-11-24)
+ft/research/confirm.py, 3 fresh seeds x 40 openings vs TRUE BASE:
+- seed 777: engine +0.0021 (L1 +0.019, L2 -0.013, L3 0.0)
+- seed 888: engine  0.0000 (L1 +0.013, L2 +0.013, L3 -0.025)
+- seed 999: engine +0.0021
+Mean ≈ +0.001. The gen1->gen2 +0.0396 was cell luck on the weakest base
+cells (run7's rule confirmed again). Currently NO statistically confirmed
+improvement over base exists anywhere in the campaign.
+
+### The L1/L2 localization is the one reproducible signal
+Across 3 INDEPENDENT setups, whenever a recipe targets levels 1-2 the
+gain shows up at L1/L2 specifically:
+- d1 (sandbox REINFORCE, 3 seeds): engine +0.058/+0.042/+0.006, L1+L2 local
+- run10 gen2 (box t5-iterated): L1 +0.100 when anything moved
+- it3 gen1 (sandbox REINFORCE iterated): L1 +0.075 (nothing elsewhere)
+Absolute deltas remain inside noise; the LOCATION of gains is stable.
+Actionable consequence for A/B testing: per-level deltas are the real
+observable; run11 should score L1/L2 with many more games (100+ openings
+per level) instead of the level-averaged delta.
+
+### it2 shelved
+The sandbox t5-iteration question is answered by the box run10 (flat ->
+luck-spike -> decay). CPU reallocated to it3 (REINFORCE-iterated chain).

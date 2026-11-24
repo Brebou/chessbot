@@ -26,6 +26,9 @@ from ft.research.sweep import EVAL_LEVELS, resolve_engine, train_candidate
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--start-gen", type=int, default=1,
+                    help="generation number to resume from (gen N trains "
+                         "from --model-path, prev = gen N-1 in out-dir)")
     ap.add_argument("--model-path", default="base_model/model.safetensors")
     ap.add_argument("--anchor-path", default=None)
     ap.add_argument("--out-dir", default="results/it3")
@@ -59,7 +62,7 @@ def main() -> None:
     from ft.eval.paired_eval import paired_engine_eval, selfplay_paired
 
     policy = args.model_path
-    for gen in range(1, args.generations + 1):
+    for gen in range(args.start_gen, args.start_gen + args.generations):
         t0 = time.monotonic()
         gdir = out_dir / f"gen{gen}"
         gdir.mkdir(parents=True, exist_ok=True)
@@ -113,7 +116,7 @@ def main() -> None:
         with open(Path("ft/research/results.jsonl"), "a") as f:
             f.write(json.dumps(row, sort_keys=True) + "\n")
         print(f"=== it3 gen {gen} done: vs_base={row['engine_delta']:+.4f} "
-              f"vs_prev={row['policy_vs_prev']} "
+              f"vs_prev={row.get('policy_vs_prev')} "
               f"balanced={row['balanced']:+.4f} ({row['elapsed_s']}s) ===",
               flush=True)
         policy = mpath
