@@ -403,3 +403,14 @@ noise, not a trend. The off-policy SF-label corpus family (runs 1-5, 300k
 rows) is now fully closed: dose does not rescue it.
 Remaining bracket: Arm 2 (REINFORCE 3-seed x 600 games) and Arm 3
 (2-gen chain); direction set by Phase-2 confirm gate.
+
+### batch f verdicts (sandbox, 400 openings = 1600 games/level-pair)
+| arm | recipe | engine | proxy | balanced | verdict |
+| f1 | d1 @ 2x games, 1 ep | 0.000 | -0.050 | -0.025 | games-dose dead |
+| f2 | d1 + w_loss 1.5 | +0.033 | -0.025 | **+0.004** | only non-negative balanced |
+| f3 | corrections only (no win/draw rows) | +0.017 | -0.100 | -0.042 | corrections alone CRUSH self-play coherence |
+Reading: the win-row leg (pushing up own moves in won games) is the anti-
+collapse term; without it the model degrades its own play. d1's recipe
+mean across doses is +0.01..+0.03 engine with sigma 0.034 -> resolvable
+only at box scale with 3+ seeds (run13 Arm 2 does exactly this). g-batch
+(trajectory rows) auto-launched.
