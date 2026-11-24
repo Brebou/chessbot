@@ -352,3 +352,45 @@ Read:
 NEXT (run11 proposal): REINFORCE-lite recipe at box scale
 (corrections ONLY from losing games + own-move rows from winning games),
 from base AND from run10/gen2 as starting points.
+
+### it3 chain: does REINFORCE-iteration compound in the sandbox? NO.
+- gen1 (vs base): engine +0.008 (L1 +0.075)
+- gen2 (vs gen1): engine -0.0417 (vs_prev -0.0417) -> regression
+Same shape as run10 on the box: one lucky step then decay. Standing
+conclusion: ITERATION DOES NOT COMPOUND for chains > 2 gens. The recipe
+family (corrections+KL) extracts a one-shot fix and then drift wins.
+Remaining research axes with headroom:
+1. f-batch (sandbox, dose-response of the d1 recipe at 400 games:
+   f1 games-dose, f2 loss-weight, f3 corrections-only) -> informs run11/12
+   starting-point choice.
+2. run11 (box): d1 recipe at 600 games from run10/gen2.
+3. run12 (box): it3 chain at 600 games/gen but STOP at gen2.
+All gated on the confirm tool: no promotion without 3-seed confirmation.
+
+### it3 FINAL (chain complete): no compounding, chain ends below base
+gen1 (+0.008 w/ L1 +0.075) -> gen2 (-0.042) -> gen3 (vs prev +0.017,
+vs base -0.025). Combined with the box's run10 (gen1 flat -> gen2 luck
+-> gen3-5 decay): correcting on fresh on-policy games is a ONE-SHOT
+extract; iterating the chain drifts below base by gen 2-3 in both
+recipes (t5-iterated and REINFORCE-iterated). Rules out the whole
+"self-improvement loop" family at this model scale.
+
+### batch g (pre-registered): trajectory (blunder-path) corrections
+For each losing game, locate the largest one-ply drop (cp_best -
+cp_model) and correct up to the 3 preceding model moves as well
+(target = SF best at each state, weight 0.25 x w_loss, deduped against
+regular rows). g1 = f1 + trajectory; g2 = trajectory-only corrections.
+Rationale: single-position CE corrects the TIPPING move; the setup
+moves keep pulling the game back into the same losing line. Path rows
+give a denser gradient on decisive games.
+- Pass: engine delta >= +0.05 at 400 games (f-caliber N).
+- Kill: < 0.
+
+### f1 verdict (2x-game dose of d1): DEAD
+1600 games at levels {1,2} (25 wins / 1249 losses / 326 draws), 9,307
+corrections from 30,648 losing states, 1 epoch over 20k rows:
+final engine 0.000, proxy -0.050, balanced -0.025.
+The games-dose axis does NOT help; d1's +0.058 does not replicate at
+2x games/1 epoch -> d1 was substantially noise + epoch-count luck.
+Batch g (trajectory corrections) chained; f2 (loss-weight 1.5),
+f3 (corrections-only) still running.

@@ -379,6 +379,7 @@ SAFETY_MIX = "results/arc2/mix_safety.jsonl"
 
 def collect_outcome_games(model_path: str, oids: List[int], levels: List[int],
                           *, seed_tag: str = "rein", max_plies: int = MAX_PLY,
+                          device: str = "cpu",
                           ) -> List[dict]:
     """Play the CURRENT policy vs the class engine (both colors) and keep
     per-model-move states WITH the game outcome, so rows can be weighted by
@@ -389,7 +390,7 @@ def collect_outcome_games(model_path: str, oids: List[int], levels: List[int],
     from chess_hw import ChessTokenizer
     from chess_hw.model import load_model
 
-    model = load_model(model_path, device="cpu")
+    model = load_model(model_path, device=device)
     probe = FastProbePlayer(model, ChessTokenizer(), batch_size=256)
     probe.name = "arc2-rein"
     book = load_openings()
@@ -429,10 +430,59 @@ def collect_outcome_games(model_path: str, oids: List[int], levels: List[int],
     return games
 
 
+def build_trajectory_rows(games: List[dict], rows: List[dict], scores: dict,
+                          *, w_loss: float, tail_plies: int = 3,
+                          drop_cp: float = 100.0,
+                          existing_fens: Optional[set] = None) -> int:
+    """Trajectory (blunder-path) corrections for losing games.
+
+    Single-position CE only corrects the tipping move; the moves that SET UP
+    the losing line still get their probability from the loss. For each
+    losing game, find the largest one-ply eval drop among its model states;
+    the up-to `tail_plies` model moves BEFORE the drop each get a correction
+    row (target = SF best at that state, weight w_loss * 0.25). Nesting the
+    corrections on the path gives a denser gradient on games that matter.
+    """
+    n_added = 0
+    for g in games:
+        if g["out"] != 0.0 or not g["states"]:
+            continue
+        states = g["states"]
+        drops = []
+        for i, s in enumerate(states):
+            sc = scores.get(s["fen"], {})
+            cb, cm = sc.get("cp_before"), sc.get("cp_after")
+            if cb is None or cm is None:
+                # derive drop from cp_best vs cp_model at this state
+                cb, cm = sc.get("cp_best"), sc.get("cp_model")
+            if cb is None or cm is None:
+                continue
+            drops.append((max(0.0, (cb or 0.0) - (cm or 0.0)), i))
+        if not drops:
+            continue
+        drop, tip = max(drops)
+        if drop < drop_cp:
+            continue
+        for i in range(max(0, tip - tail_plies), tip + 1):
+            s = states[i]
+            if existing_fens and s["fen"] in existing_fens:
+                continue
+            sc = scores.get(s["fen"], {})
+            best = sc.get("best_uci")
+            if not best or best == s["model_move"]:
+                continue
+            rows.append({"bucket": "normal", "key": s["fen"],
+                         "start_fen": s["fen"], "history": s["history"],
+                         "target": best, "weight": w_loss * 0.25})
+            n_added += 1
+    return n_added
+
+
 def build_reinforce_mix(games: List[dict], out_path: Path, *,
                         engine_path: str, sf_depth: int, sf_workers: int,
                         w_win: float = 1.0, w_loss: float = 1.0,
-                        w_draw: float = 0.3, cap: int = 12000) -> tuple:
+                        w_draw: float = 0.3, cap: int = 12000,
+                        trajectory: bool = False) -> tuple:
     """REINFORCE-lite rows: WINNING games -> CE rows pushing UP the model's
     own played moves (weight w_win); LOSING games -> CE rows to the SF best
     move when the played move was a blunder (weight w_loss), otherwise a
@@ -480,6 +530,13 @@ def build_reinforce_mix(games: List[dict], out_path: Path, *,
             n_corr += 1
         print(f"rein: {n_corr} correction rows from {len(uniq)} losing states",
               flush=True)
+        if trajectory:
+            seen = {r["key"] for r in rows}
+            n_traj = build_trajectory_rows(games, rows, scores,
+                                           w_loss=w_loss,
+                                           existing_fens=seen)
+            print(f"rein: +{n_traj} trajectory (blunder-path) rows",
+                  flush=True)
     rng = random.Random("rein-cap")
     rng.shuffle(rows)
     if cap and len(rows) > cap:
@@ -502,9 +559,11 @@ def run_reinforce_arm(out_dir: Path, *, model_path: str, base_path: str,
     name = cfg.get("name", "d1")
     t0 = time.monotonic()
     engine_path = resolve_engine(engine_path)
-    oids = _select_oids(f"rein-{name}", cfg.get("games", 200))
+    oids = _select_oids(cfg.get("rein_seed", f"rein-{name}"),
+                        cfg.get("games", 200))
     games = collect_outcome_games(model_path, oids,
-                                  cfg.get("rein_levels", [1, 2]))
+                                  cfg.get("rein_levels", [1, 2]),
+                                  device=cfg.get("rein_device", "cpu"))
     n_win = sum(1 for g in games if g["out"] == 1.0)
     n_loss = sum(1 for g in games if g["out"] == 0.0)
     print(f"rein games: {len(games)} total, {n_win} wins, {n_loss} losses, "
@@ -514,7 +573,7 @@ def run_reinforce_arm(out_dir: Path, *, model_path: str, base_path: str,
         games, mix_path, engine_path=engine_path, sf_depth=sf_depth,
         sf_workers=sf_workers, w_win=cfg.get("w_win", 1.0),
         w_loss=cfg.get("w_loss", 1.0), w_draw=cfg.get("w_draw", 0.3),
-        cap=cfg.get("cap", 12000))
+        cap=cfg.get("cap", 12000), trajectory=cfg.get("trajectory", False))
     done = train_candidate(
         mix_path, model_path=model_path, base_path=base_path,
         out_dir=out_dir / name, epochs=cfg.get("epochs", 2), lr=cfg["lr"],
@@ -553,6 +612,28 @@ REINFORCE_CONFIGS = {
            "kl": 0.1, "lr": 5e-5},
     "d2": {"games": 200, "rein_levels": [1], "w_win": 1.0, "w_loss": 1.5,
            "w_draw": 0.0, "cap": 12000, "epochs": 2, "kl": 0.1, "lr": 5e-5},
+    # -- batch f: sandbox dose-response on the d1 recipe --
+    # f1: same recipe, 2x games (does the d-signal grow with games N?)
+    "f1": {"games": 400, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.0, "w_draw": 0.3, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5},
+    # f2: heavier loss weight (1.5x corrections on losing games)
+    "f2": {"games": 400, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.5, "w_draw": 0.3, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5},
+    # f3: pure corrections (no win/draw rows) — isolates the correction leg
+    "f3": {"games": 400, "rein_levels": [1, 2], "w_win": 0.0,
+           "w_loss": 1.0, "w_draw": 0.0, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5},
+    # -- batch g: trajectory (blunder-path) corrections --
+    # g1: f1 recipe + dense corrections along the losing path
+    "g1": {"games": 400, "rein_levels": [1, 2], "w_win": 1.0,
+           "w_loss": 1.0, "w_draw": 0.3, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5, "trajectory": True},
+    # g2: trajectory-only corrections (even denser focus on lost games)
+    "g2": {"games": 400, "rein_levels": [1, 2], "w_win": 0.0,
+           "w_loss": 1.0, "w_draw": 0.0, "cap": 20000, "epochs": 1,
+           "kl": 0.1, "lr": 5e-5, "trajectory": True},
 }
 
 
@@ -712,6 +793,14 @@ def main() -> None:
     ap.add_argument("--eval-workers", type=int, default=4)
     ap.add_argument("--eval-seed", type=int, default=1234)
     ap.add_argument("--configs", default="a1,a2,a3")
+    ap.add_argument("--reinforce-games", type=int, default=None,
+                    help="override the d-arm game count (d1/d2 default 200)")
+    ap.add_argument("--reinforce-device", default="cpu",
+                    help="device for the outcome-game collector (cuda on "
+                         "the GPU box)")
+    ap.add_argument("--reinforce-seed", default=None,
+                    help="override the d-arm opening-set seed (vary per "
+                         "generation for fresh cells)")
     ap.add_argument("--safety-arm", action="store_true")
     ap.add_argument("--stage", default="all",
                     choices=["scan", "corpus", "sweep", "all"])
@@ -767,6 +856,11 @@ def main() -> None:
             cfg["engine_path"] = args.engine
             cfg["sf_depth"] = args.sf_depth
             cfg["sf_workers"] = args.sf_workers
+            if args.reinforce_games is not None:
+                cfg["games"] = args.reinforce_games
+            if args.reinforce_seed is not None:
+                cfg["rein_seed"] = args.reinforce_seed
+            cfg["rein_device"] = args.reinforce_device
             run_reinforce_arm(out_dir, model_path=args.model_path,
                               base_path=base_path, cfg=cfg,
                               eval_openings=args.eval_openings,

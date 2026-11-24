@@ -817,3 +817,42 @@ def test_build_reinforce_mix_outcomes(monkeypatch, tmp_path):
     assert draw["target"] == "d2d4" and draw["weight"] == 0.3
     assert len(blun) == 1 and blun[0]["target"] == "a1a2" and blun[0]["weight"] == 1.0
     assert rows == 3
+
+
+def test_build_trajectory_rows():
+    from ft.research.arc2 import build_trajectory_rows
+    games = [{"out": 0.0, "level": 1, "oid": 9, "states": [
+        {"fen": "B0", "history": [], "model_move": "e2e4"},
+        {"fen": "B1", "history": [], "model_move": "d2d4"},
+        {"fen": "B2", "history": [], "model_move": "e2e5"},
+    ]}]
+    scores = {
+        "B0": {"cp_best": 100.0, "cp_model": 80.0, "best_uci": "d2d4"},
+        "B1": {"cp_best": 100.0, "cp_model": 90.0, "best_uci": "e2e4"},
+        "B2": {"cp_best": 100.0, "cp_model": -400.0, "best_uci": "e2e4"},
+    }
+    rows = []
+    n = build_trajectory_rows(games, rows, scores, w_loss=1.0)
+    # tip is B2 (drop 500); tail = B2..B0 (3 plies): all differ from played
+    assert n == 3
+    by = {r["key"]: r for r in rows}
+    assert by["B2"]["target"] == "e2e4" and by["B2"]["weight"] == 0.25
+    assert by["B0"]["target"] == "d2d4" and by["B0"]["weight"] == 0.25
+    # dedupe: existing fens are skipped
+    rows2 = []
+    n2 = build_trajectory_rows(games, rows2, scores, w_loss=1.0,
+                               existing_fens={"B1", "B2"})
+    assert n2 == 1 and rows2[0]["key"] == "B0"
+    # small drop (< drop_cp) -> no rows
+    scores_low = {k: {"cp_best": 100.0, "cp_model": 80.0, "best_uci": "d2d4"}
+                  for k in ("B0", "B1", "B2")}
+    rows3 = []
+    assert build_trajectory_rows(games, rows3, scores_low, w_loss=1.0) == 0
+
+
+def test_reinforce_configs_registered():
+    from ft.research.arc2 import REINFORCE_CONFIGS
+    for name in ("d1", "d2", "f1", "f2", "f3", "g1", "g2"):
+        assert name in REINFORCE_CONFIGS
+    assert REINFORCE_CONFIGS["g1"].get("trajectory") is True
+    assert REINFORCE_CONFIGS["f3"]["w_win"] == 0.0
