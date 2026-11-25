@@ -33,34 +33,23 @@ class Vocab:
                 "Edit common.load_vocab() to build {token: id} for your tokenizer.")
 
 
-def load_vocab(path):
-    path = str(path)
-    tok2id = {}
-    try:
-        from transformers import AutoTokenizer
-        tok2id = AutoTokenizer.from_pretrained(path, trust_remote_code=True).get_vocab()
-    except Exception:
-        pass
-    if not any(UCI_RE.match(t) for t in tok2id):
-        vj = Path(path) / "vocab.json"
-        if vj.exists():
-            tok2id = json.load(open(vj))
-    return Vocab(tok2id)
+def load_vocab(path=None):
+    # The repo's real tokenizer: 1968 plain-UCI move tokens + [PAD]/[BOS]/[EOS].
+    from chess_hw.tokenizer import ChessTokenizer
+    return Vocab(ChessTokenizer().token_to_id)
 
 
 def load_model(path, device="cpu"):
-    path = str(path)
-    from transformers import AutoModelForCausalLM
-    try:
-        model = AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True)
-    except Exception:
-        from transformers import GPT2LMHeadModel
-        model = GPT2LMHeadModel.from_pretrained(path)
-    return model.to(device).eval(), load_vocab(path)
+    # The repo's real loader: dir containing model.safetensors, or the file itself.
+    # Returns a ChessGPT (forward(input_ids) -> plain (B,T,V) logits tensor).
+    from chess_hw.model import load_model as _hw_load
+    return _hw_load(path, device=device).eval(), load_vocab(path)
 
 
 def logits_of(model, ids):
     out = model(input_ids=ids)
+    if isinstance(out, torch.Tensor):   # ChessGPT.forward returns a plain (B,T,V) tensor
+        return out
     return out.logits if hasattr(out, "logits") else out[0]
 
 
@@ -78,19 +67,12 @@ def choose_move(model, vocab, board, hist_ids, device):
 
 
 def save_checkpoint(model, base_dir, out_dir):
-    """Copy base_dir (config, tokenizer...) and write model.safetensors with the SAME keys as base."""
-    from safetensors import safe_open
-    from safetensors.torch import save_file
-    out_dir = Path(out_dir)
-    shutil.copytree(base_dir, out_dir, dirs_exist_ok=True)
-    with safe_open(str(Path(base_dir) / "model.safetensors"), "pt") as f:
-        keys = list(f.keys())
-    sd = model.state_dict()
-    missing = [k for k in keys if k not in sd]
-    if missing:
-        raise RuntimeError(f"keys in base file not in model.state_dict(): {missing[:5]}")
-    save_file({k: sd[k].detach().cpu().clone().contiguous() for k in keys},
-              str(out_dir / "model.safetensors"), metadata={"format": "pt"})
+    """Write out_dir/model.safetensors with the canonical repo serializer
+    (chess_hw.model.save_model: float32, same keys as base, loadable by
+    chess_hw.model.load_model / ModelPlayer). base_dir keeps only its
+    model.safetensors in this repo, so there is nothing else to copy."""
+    from chess_hw.model import save_model
+    return save_model(model, Path(out_dir))
 
 
 # ----------------------------------------------------------------- stockfish
