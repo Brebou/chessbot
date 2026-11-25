@@ -427,6 +427,46 @@ def test_ft_sft_config_eval_seed_default_none():
     assert cfg2.eval_seed == 1234
 
 
+def test_rloo_advantages():
+    from ft.research.grpo import rloo_advantages, group_advantages
+
+    A = rloo_advantages([1.0, 0.0, 0.0, 0.0])
+    assert abs(A[0] - 1.0) < 1e-9
+    assert abs(sum(A)) < 1e-9          # centered within the group
+    assert rloo_advantages([0.5, 0.5]) == [0.0, 0.0]   # constant group
+    assert rloo_advantages([1.0]) == [0.0]             # degenerate group
+    g = {"games": [{"out": r} for r in (1.0, 0.0, 0.5)]}
+    assert group_advantages(g) == rloo_advantages([1.0, 0.0, 0.5])
+
+
+def test_sampling_probe_legal_diverse_deterministic():
+    import chess as _chess
+    import random as _random
+    from chess_hw import ChessTokenizer
+    from ft.research.grpo import SamplingProbe
+
+    torch.manual_seed(7)
+    board = _chess.Board()
+    for u in ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4"):
+        board.push_uci(u)
+    probe = SamplingProbe(ChessGPT(CONFIG), ChessTokenizer(),
+                          temperature=0.9, seed=123)
+    probe.rng = _random.Random(1)
+    a1 = probe.choose(board).move.uci()
+    probe.rng = _random.Random(1)
+    a2 = probe.choose(board).move.uci()
+    assert a1 == a2 and a1 in {m.uci() for m in board.legal_moves}
+    seen = set()
+    for s in range(8):
+        p2 = SamplingProbe(ChessGPT(CONFIG), ChessTokenizer(),
+                           temperature=0.9, seed=s)
+        mv = p2.choose(board).move
+        if mv is not None:
+            assert mv in board.legal_moves
+            seen.add(mv.uci())
+    assert len(seen) >= 2   # sampling must differ from greedy monotony
+
+
 def test_ft_loss_kl_anchor_term():
     torch.manual_seed(1)
     model = ChessGPT(CONFIG)
