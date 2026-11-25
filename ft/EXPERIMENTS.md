@@ -447,11 +447,15 @@ after gen 2; eval-seed luck dominates single-cell results.
   comparable and no longer manufacture hope. NOTE: all run13 Arm-2/Arm-3
   internal epoch evals printed BEFORE this fix are seed-42 cells and are NOT
   comparable to their formal numbers.
-- Chain verdict: capped at gen 2, nothing banked. Chain decay confirmed a
-  3rd time (run10, it3, run13). REINFORCE chain axis closed pending the
-  Phase-2 3-seed confirm of results/run13/chain/gen2/d1/final (still worth
-  running: it is the only box-scale formal check of the family, and +0.033
-  twice in-seed made it the best candidate alive).
+- Chain verdict (FINAL): capped at gen 2, Phase-2 confirm ran on box
+  (results/run13/chain/gen2/d1/final, 3 seeds x 40 openings): engine delta
+  +0.021/+0.006/+0.002 (mean +0.010, always < 2*sigma), proxy NEGATIVE on all
+  three seeds (-0.013/-0.050/-0.035), balanced +0.004/-0.022/-0.016 ->
+  qualifies=false on all seeds. The two in-run +0.033 numbers were seed luck
+  (they came from seed-42 cells printed before the eval_seed fix). REINFORCE
+  chain axis CLOSED; "chain spikes are noise" now replicated 4 times
+  (run10, it3, run13, phase-2 confirm). No live candidate outside i/j-batch
+  and run14/run14b.
 
 ### fixed g-batch verdicts (sandbox; dedupe bug fixed, rows actually emitted)
 | arm | recipe | engine | proxy | balanced | trajectory rows |
