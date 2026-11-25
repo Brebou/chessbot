@@ -201,6 +201,7 @@ class FTSFTTrainer:
         self.best_score: Optional[float] = None
         self.best_state: Optional[Dict] = None
         self.prev_normal_ce: Optional[float] = None
+        self._peak_balanced: Optional[float] = None
         self.balanced_history: List[float] = []
         self._records_cache: Dict[str, list] = {}   # base engine records reused
         self._base_fixtures: Optional[dict] = None
@@ -449,6 +450,16 @@ class FTSFTTrainer:
                 self.best_state = self._snapshot()
                 self._save(self.run_dir / "best")
                 row["best"] = True
+            # Peak banking: the campaign's transient epoch peaks (+0.033..+0.04
+            # engine delta) were never stored because `significant` (delta -
+            # 2σ > 0) never fired. Bank the best BALANCED checkpoint so far
+            # regardless of significance - qualification is still decided by
+            # the 3-seed confirm gate downstream, never by this.
+            if self._peak_balanced is None or balanced > self._peak_balanced:
+                self._peak_balanced = balanced
+                self._save(self.run_dir / "peak")
+                row["peak"] = True
+                print(f"\n⭐ peak banked: balanced={balanced:.4f}", flush=True)
         self._log(row)
         self._prune_checkpoints()
         if abort is not None:

@@ -12,7 +12,7 @@ instruments they use are in `ft/eval/` (paired eval + frozen fixtures).
 | Submission candidate | `base_model` (paired score 0.231) |
 | Fallback | `results/sft/run1/final` (0.210) |
 | Checkpoint qualification rule | `balanced − 2σ > 0`; nothing qualified (10 post-training runs, ~60 evals) |
-| Local suite | 142 passed / 7 skipped (#41–#50 + dense-soft-loss tests; pending merge) |
+| Local suite | 151 passed / 7 skipped (as of j-batch; see PR for grpo.py + peak banking) |
 | Current stage | run5 **killed**; poc/run7 flat-negative steady state over 16 iterations; decision pending: run8 (rehearsal-share amendment) or stop and submit `base_model` |
 
 ## How models are evaluated (3 instruments, all paired vs base)
@@ -474,6 +474,34 @@ arms). WiSE-FT blend with base 0.5 (s2) flattens the spike: -0.008, dead.
 qualifies=false all seeds, proxy -0.035/-0.030/-0.020 on all seeds.
 Verdict: averaging flat arms gives flat; the L1 spike was averaging luck,
 not signal. Direction DEAD. (Code: ft/research/soup.py.)
-Also: run14 sandbox prototype OOM-killed once (22 SF workers @ depth 12 +
-concurrent soup evals breached the 4 GB cgroup); relaunched at 12 workers.
-Lesson: sandbox concurrency budget = ONE heavy job at a time.
+Also: run14 sandbox prototype OOM-killed three times (22/12/6 SF workers @
+depth 12, with and without concurrent evals; `oom_kill` counter rose with
+each attempt; BrokenPipe in the score pool = parent killed first).
+Verdict: depth-12 SF scoring + python/torch pool workers cannot fit the
+4 GB sandbox cgroup at any worker count tried. **run14 = box-only.**
+Lesson re-confirmed: sandbox concurrency budget = ONE heavy job at a time.
+
+### run14b / longer runs: peak banking implemented (j-batch PR)
+Historic transient epoch peaks (+0.033, +0.0396, +0.0313 across run10/run13)
+were never stored because checkpoint banking was gated on `significant`
+(which never fired, so `best_score: None` everywhere). Added unconditional
+`peak/` banking in `_finish_eval`: the best balanced-so-far checkpoint is
+banked regardless of significance; qualification still only by the 3-seed
+confirm. This is the concrete tool for the "longer run / J-curve" question:
+a 5-gen low-lr chain with peak banking harvests transient peaks instead of
+losing them at the final eval.
+
+### j-batch (pre-registered): group-relative RL (RLOO / GRPO-style)
+Model: ft/research/grpo.py. K=8 temperature-sampled rollouts per
+(opening, level, color) via SamplingProbe (legal-masked, T=0.9, greedy is
+deterministic and useless for groups), RLOO advantages
+A_i = r_i − mean(others) converting ALL games into signed gradient,
+positive games -> own-move CE rows weighted by Ahat; j2 adds negative-game
+SF-scored blunder corrections weighted by |Ahat| (no negative CE weights:
+training-to-lower-probability of exact opponent-dependent moves degenerates).
+KL 0.1 anchor throughout. Known risks: positive-signal starvation at 1.7%
+win rate (mitigated by K=8 relative advantage), L3 groups ≈ constant
+outcome (A≈0, harmless). j1 = pure RLOO (no SF in loss -> sandbox-safe);
+j2 = with negative corrections. Pass: any arm with balanced > +0.02 at
+arm eval, then 3-seed confirm; kill: j1 balanced < −0.01 (sampling
+regression) or j2 balanced < j1.
