@@ -505,3 +505,59 @@ outcome (A≈0, harmless). j1 = pure RLOO (no SF in loss -> sandbox-safe);
 j2 = with negative corrections. Pass: any arm with balanced > +0.02 at
 arm eval, then 3-seed confirm; kill: j1 balanced < −0.01 (sampling
 regression) or j2 balanced < j1.
+
+### i-batch verdict (box, last-k-layer-localized FT): engine axis DEAD too
+Reinforce-family corrections with localized updates (freeze all but last
+k blocks, higher lr to compensate):
+| arm | recipe | engine | proxy | balanced | notes |
+| i1 | last 1 block, lr 5e-5, 400g, 1 ep | -0.017 | -0.050 | -0.033 | KL 0.03 — barely moved |
+| i2 | last 2 blocks, lr 3e-4, 400g, 1 ep | 0.000 | -0.075 | -0.038 | KL 0.26; L1 +0.10 spike pattern AGAIN |
+| i3 | last 1 block, lr 3e-4, 600g, 2 ep | -0.025 | -0.088 | -0.056 | epoch 2 degraded vs epoch 1 |
+Reading: partial freezing does NOT rescue the corrections recipe — with
+fewer params moved the damage just concentrates: proxy (Elo) damage is the
+worst of any family so far (-0.05..-0.09 vs -0.02..-0.05 for d/f), engine
+never better than 0. The i2/i3 arm anchors (KL 0.1) lost containment at
+lr 3e-4 (KL values 3-10x the i1 arm). The recurring L1 +0.10 spike shows up
+in yet another independent family (4th time: f2, soup s1, i2, i3) — it is
+a two-cell artifact of the 10-opening eval plus a real early-game drift that
+the 3-seed gate correctly kills. No confirm needed: all balanced < 0.
+Axis CLOSED (freeze_last_k helper stays in the trainer — it is useful
+infrastructure, e.g. for run14b if ever desired).
+Note: peak banking visibly fired on all three runs ("⭐ peak banked") —
+infrastructure works; with 1-2 epochs there was nothing above final to harvest.
+
+### j-batch verdict (box + sandbox smoke): RLOO mechanism works, effect DEAD
+Directory-signal notice: the box regenerated `grpo.py` from merged main before
+running, so these are the committed implementations (plus sandbox smoke test
+`j1-smoke-sandbox`, which completed end-to-end on CPU and independently
+reproduced box j1: balanced -0.048 mini vs -0.046 full).
+
+| arm | mix | engine | proxy | balanced | notes |
+| j1 | pure RLOO, 4225 rows | -0.017 | -0.075 | -0.046 | kill rule hit (balanced < -0.01) |
+| j2 | RLOO + SF corrections on negative-advantage states (3661 of 12393) | -0.033 | -0.013 | -0.023 | best proxy of any FT arm; L1 spike 5th appearance |
+
+What worked (validate before you bury): the group-relative machinery did
+exactly what it was designed for — 84/160 groups had a non-constant outcome,
+i.e. most openings produced within-group reward variance at K=8 rollouts, so
+RLOO converted the 97%-loss-rate game distribution into signed rows. The
+mix + KL + peak banking pipeline is sound (unit tests + smoke + box agree).
+
+Why the effect is dead anyway:
+1. **Policy mismatch**: games are collected at T=0.9 sampling; the model plays
+   greedy top-1->2->3 at eval. Increasing the probability of sampled moves that
+   won under *sampled* play improved nothing under *greedy* play.
+2. **Dose**: 1 epoch over 4-16k rows; the d/f family showed the same
+   "1 epoch of outcome rows" flatness. j2's proxy flatness (-0.013, best FT
+   arm) suggests the SF-corrections leg is the least harmful thing we have,
+   consistent with its use in rehearsal mixes.
+3. L3 pulls every arm down uniformly (base is dead there; nothing to win).
+
+Optional follow-up (pre-registered j3/j4, cheap since mixes are saved on disk
+as results/grpo-j{1,2}/mix_j{N}.jsonl): retrain 2-3 epochs at lr 3e-5, KL 0.1
+from the saved j2 mix — tests the dose hypothesis without re-collecting.
+Pass: balanced > +0.02, then 3-seed confirm. Kill: no arm > 0. If nothing
+pass, j-batch closes and the corrections axis is fully retired.
+
+Remaining live: run14 (depth-12 labels — exoneration/conviction of label
+quality), run14b (5-gen low-lr peak-harvest chain), then submission decision
+(base_model 0.231 unless run14b/14b peaks confirm).
