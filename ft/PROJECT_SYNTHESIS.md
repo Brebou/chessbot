@@ -145,7 +145,7 @@ Scores below are paired-vs-base deltas at the eval resolution of their run;
 | h-batch (soup, soup.py) | weight-average 4 REINFORCE finals; WiSE-FT 0.5 blend | zero: mean +0.005 over 3 seeds, proxy negative everywhere; averaging flat arms gives flat. DEAD |
 | i-batch (box) | last-k-layer-localized FT (`last_k_layers`), i1/i2/i3 configs | **DEAD**: i1 −0.033 / i2 −0.038 / i3 −0.056 balanced; proxy damage worst of any family (−0.05..−0.09), engine never > 0; freezing 3 of 4 blocks concentrates the damage instead of containing it; KL anchor lost containment at lr 3e-4 |
 | run14 | depth-12 SF labels for correction quality | **sandbox cannot fit** (4 GB cgroup OOM ×3 at 22/12/6 workers); box-only |
-| j-batch (this PR) | RLOO/GRPO group-relative RL (grpo.py, j1/j2) | **OPEN** — sandbox prototype |
+| j-batch (box + smoke) | RLOO/GRPO group-relative RL (grpo.py, j1/j2) | **MECHANISM VALIDATED, EFFECT DEAD**: 84/160 groups had within-group outcome variance (RLOO did its job), but j1 balanced −0.046 / j2 −0.023. Diagnosis: collect-at-T=0.9 vs greedy-decode policy mismatch + 1-epoch dose; j2's proxy (−0.013) is the best FT arm (SF-corrections leg least harmful). Optional j3/j4 = retrain from saved mixes, 2–3 ep, lr 3e-5 |
 
 ### Robust, replicated facts (don't re-litigate these)
 
@@ -226,10 +226,10 @@ train 2 epochs ≈ 10–15 min, eval ≈ 1–2 min → a whole arm ≈ 30–45 m
 
 1. **DONE — run13 chain gen2 Phase-2 confirm**: qualifies=false on 777/888/999 (engine +0.021/+0.006/+0.002, proxy negative all seeds). REINFORCE chain axis closed.
 2. **DONE — i-batch at scale (i1/i2/i3)**: dead (see matrix); the corrections-recipe axis is fully closed with it.
-3. **j-batch sandbox prototype** (solo, background) then **box j1/j2** (§6) — the last untested structural idea.
+3. **DONE — j-batch box j1/j2**: mechanism validated (84/160 groups with signal), effect dead (−0.046/−0.023). Optional pre-registered j3/j4: retrain from `results/grpo-j2/mix_j2.jsonl` (saved on disk) at 2–3 epochs, lr 3e-5, KL 0.1 — dose test without re-collecting.
 4. **run14**: depth-12 SF labels for the f2 recipe — box only. Still worth one run even after the family closures: it exonerates or convicts *label quality* independent of recipe structure.
 5. **run14b**: 5-gen chain of the f2/REINFORCE recipe at lr 3e-5 + KL 0.1, harvesting `peak/` banks; confirm any peak that beats its final.
-6. **Decision rule if everything stays flat**: submit `base_model` + the negative-result map. Honest framing: every recipe family closed with replication (a→i), one metric-alignment bug found and fixed, infrastructure wins (seed alignment, peak banking) that would make a re-take faster. The binding constraint is model capacity + greedy decoding — post-training did not move the regime.
+6. **Decision rule if everything stays flat**: submit `base_model` + the negative-result map. Honest framing: every recipe family closed with replication (a→j), one metric-alignment bug found and fixed, infrastructure wins (seed alignment, peak banking) that would make a re-take faster. The binding constraint is model capacity + greedy decoding — post-training did not move the regime. The friend's group-relative RL idea was implemented faithfully and its mechanism *worked* (RLOO produced signal where the 1.7% win rate starved REINFORCE) — the outcome was flat anyway, which is itself a strong negative result: the model's games are not differentiable enough by outcome alone for credit assignment to extract score.
 7. Deferred: grounded Syzygy TB relabels, legal-masked CE, soft-target cp_second, `WRITEUP.md` authoring.
 
 ---
@@ -240,7 +240,8 @@ train 2 epochs ≈ 10–15 min, eval ≈ 1–2 min → a whole arm ≈ 30–45 m
 - Fallback: `results/sft/run1/final` (0.210).
 - The only campaign candidate that ever reached the real 3-seed gate for
   final/checkpoint arbitration (run13 chain gen2) failed it (see §5).
-  Nothing qualifies — nothing should be submitted but `base_model` beyond it.
+  Nothing qualifies — submission is `base_model` unless run14b/run14 or
+  the optional j3/j4 dose-retrain produce a confirmed peak.
 - Historic transient epoch peaks (+0.033..+0.0396) are now banked
   automatically into `peak/` so future long runs can be mined, but treat
   them as noise until a confirm says otherwise.

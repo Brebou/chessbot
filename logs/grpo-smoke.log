@@ -1,0 +1,13 @@
+grpo: 40 groups (10 with signal), 396 rows [48s]
+mix: 383 train / 13 val; buckets {'normal': 383}
+
+⭐ peak banked: balanced=-0.0479
+
+eval [epoch-1]: balanced=-0.0479 (engine -0.0583 / proxy -0.0375)
+  delta/level: L1 +0.0250  L2 -0.1250  L3 -0.0750
+  official (S1+S2+S3)/3: cand=0.0500 base=0.1083 delta=-0.0583
+  engine sigma=0.0304 qualifies (delta - 2*sigma > 0): False
+  eval timing: engine 47s | proxy 6s
+
+epoch 1: val_ce=1.5305 (1s)
+GRPO: {"run": "grpo/j1", "config": {"n_openings": 10, "k_rollouts": 4, "temperature": 0.9, "levels": [1, 2], "w_pos": 1.0, "w_neg": 0.0, "cap": 20000, "epochs": 1, "kl": 0.1, "lr": 5e-05, "batch": 256, "seed_tag": "grpo-j1", "name": "j1", "device": "cpu"}, "mix_rows": 396, "groups": 40, "groups_with_signal": 10, "engine_delta": -0.058333333333333334, "sigma": 0.029586273333963745, "per_level": {"1": 0.025, "2": -0.125, "3": -0.075}, "proxy_delta": -0.03749999999999998, "balanced": -0.047916666666666656, "eval_seed": 1234, "eval_openings": 10, "elapsed_s": 133}
