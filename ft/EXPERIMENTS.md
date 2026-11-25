@@ -505,3 +505,23 @@ outcome (A≈0, harmless). j1 = pure RLOO (no SF in loss -> sandbox-safe);
 j2 = with negative corrections. Pass: any arm with balanced > +0.02 at
 arm eval, then 3-seed confirm; kill: j1 balanced < −0.01 (sampling
 regression) or j2 balanced < j1.
+
+### i-batch verdict (box, last-k-layer-localized FT): engine axis DEAD too
+Reinforce-family corrections with localized updates (freeze all but last
+k blocks, higher lr to compensate):
+| arm | recipe | engine | proxy | balanced | notes |
+| i1 | last 1 block, lr 5e-5, 400g, 1 ep | -0.017 | -0.050 | -0.033 | KL 0.03 — barely moved |
+| i2 | last 2 blocks, lr 3e-4, 400g, 1 ep | 0.000 | -0.075 | -0.038 | KL 0.26; L1 +0.10 spike pattern AGAIN |
+| i3 | last 1 block, lr 3e-4, 600g, 2 ep | -0.025 | -0.088 | -0.056 | epoch 2 degraded vs epoch 1 |
+Reading: partial freezing does NOT rescue the corrections recipe — with
+fewer params moved the damage just concentrates: proxy (Elo) damage is the
+worst of any family so far (-0.05..-0.09 vs -0.02..-0.05 for d/f), engine
+never better than 0. The i2/i3 arm anchors (KL 0.1) lost containment at
+lr 3e-4 (KL values 3-10x the i1 arm). The recurring L1 +0.10 spike shows up
+in yet another independent family (4th time: f2, soup s1, i2, i3) — it is
+a two-cell artifact of the 10-opening eval plus a real early-game drift that
+the 3-seed gate correctly kills. No confirm needed: all balanced < 0.
+Axis CLOSED (freeze_last_k helper stays in the trainer — it is useful
+infrastructure, e.g. for run14b if ever desired).
+Note: peak banking visibly fired on all three runs ("⭐ peak banked") —
+infrastructure works; with 1-2 epochs there was nothing above final to harvest.
