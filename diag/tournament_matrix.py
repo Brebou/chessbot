@@ -38,8 +38,8 @@ _STOPS = [
     (1.00, (26, 152, 80)),    # green
 ]
 
-# After mixing with white up to this threshold, keep dark text.
-_WHITE_MIX_LIMIT = 0.70
+# Cells are tinted with dark text unless the background is dark enough to
+# switch to white (checked per color via relative luminance).
 
 
 def _interp(c0: Tuple[int, int, int], c1: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
@@ -94,8 +94,7 @@ class TournamentResults:
         self.standings: List[dict] = rr.get("standings", [])
         self.pairs: List[dict] = rr.get("pairs", [])
 
-        self.names: Dict[str, str] = {}
-        self.ranks: Dict[str, int] = {}
+        self.names: Dict[str, str] = {}        self.ranks: Dict[str, int] = {}
         self.scores: Dict[str, Optional[float]] = {}
         for row in self.standings:
             sid = row.get("id")
@@ -321,7 +320,7 @@ def build_csv(res: TournamentResults, ids: List[str]) -> str:
 
 def order_ids(res: TournamentResults, sort_mode: str) -> List[str]:
     ids = res.team_ids
-    rank_i, name_i, score_i = res.ranks, types_name(res), res.scores
+    rank_i, name_i = res.ranks, res.names
     if sort_mode == "name":
         return sorted(ids, key=lambda s: name_i.get(s, s).lower())
     if sort_mode == "avg":
@@ -331,10 +330,6 @@ def order_ids(res: TournamentResults, sort_mode: str) -> List[str]:
         return sorted(ids, key=avg, reverse=True)
     # rank (default): standings order, unknown ranks last
     return sorted(ids, key=lambda s: (rank_i.get(s, 10**9), name_i.get(s, s)))
-
-
-def types_name(res: TournamentResults) -> Dict[str, str]:
-    return res.names
 
 
 def write_atomic(path: Path, text: str) -> None:
