@@ -86,11 +86,15 @@ def replay_targets(
 
 
 def progress_iter(iterable, total: int, desc: str, every: int = 10, extra=None):
-    """Yield items while printing progress lines with rate and ETA."""
+    """Yield items while printing progress lines with rate and ETA.
+
+    Prints after each of the first 3 items, then every `every` items, so
+    slow workers are visible immediately.
+    """
     t0 = time.time()
     for done, item in enumerate(iterable, start=1):
         yield item
-        if done % every == 0 or done == total:
+        if done <= 3 or done % every == 0 or done == total:
             dt = time.time() - t0
             eta = dt / done * (total - done)
             line = f"[{desc}] {done}/{total} ({dt:.0f}s elapsed, ~{eta:.0f}s left)"

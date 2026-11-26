@@ -16,6 +16,7 @@ Each round:
 from __future__ import annotations
 
 import argparse
+import os
 import pickle
 import random
 import sys
@@ -43,6 +44,9 @@ _M = {}
 
 
 def _init(path):
+    import os
+
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
     torch.set_num_threads(1)
     _M["p"] = ModelPlayer(load_model(path))
 
@@ -110,6 +114,7 @@ def collect(model_path, n_games, seed, opps, max_plies, teacher_level, workers, 
     if workers <= 1:
         it = map(_dagger_one, tasks)
     else:
+        print(f"starting pool of {workers} workers (spawn, model loads in each worker)", flush=True)
         pool = get_context("spawn").Pool(workers, initializer=_init, initargs=(str(model_path),))
         it = pool.imap_unordered(_dagger_one, tasks, chunksize=1)
     for item in progress_iter(it, len(tasks), "dagger-collect", every=log_every, extra=status):
@@ -158,8 +163,16 @@ def main():
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
+    try:
+        affinity = len(os.sched_getaffinity(0))
+    except AttributeError:
+        affinity = os.cpu_count()
     print(f"dagger: model={args.model} prev={args.prev} games={args.games} opps={args.opps} "
           f"teacher=L{args.teacher} label_all={args.label_all} workers={args.workers} seed={args.seed}", flush=True)
+    print(f"cpu cores available to this process: {affinity}", flush=True)
+    if args.workers > affinity:
+        print(f"WARNING: workers={args.workers} > {affinity} available cores; "
+              f"consider --workers {affinity}.", flush=True)
     t0 = time.time()
     new = collect(args.model, args.games, args.seed, args.opps, args.max_plies, args.teacher,
                   args.workers, log_every=args.log_every, verbose=args.verbose)

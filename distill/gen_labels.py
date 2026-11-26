@@ -15,6 +15,7 @@ Cost: L3 self-play ~26 s per 100-ply game on one core; scale --workers.
 from __future__ import annotations
 
 import argparse
+import os
 import pickle
 import random
 import sys
@@ -35,7 +36,12 @@ from distill.common import engine_move, progress_iter, replay_targets, wrap_task
 
 
 def _init():
-    pass
+    import os
+
+    import torch
+
+    torch.set_num_threads(1)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 
 def _gen_one_impl(task):
@@ -78,9 +84,18 @@ def main():
     ap.add_argument("--log_every", type=int, default=20,
                     help="print a progress line every N games")
     args = ap.parse_args()
+    try:
+        affinity = len(os.sched_getaffinity(0))
+    except AttributeError:
+        affinity = os.cpu_count()
     print(f"gen_labels: {args.n_games} games, white=L{args.white} black=L{args.black} "
           f"teacher=L{args.teacher} label_all={args.label_all} max_plies={args.max_plies} "
           f"workers={args.workers} seed={args.seed}", flush=True)
+    print(f"cpu cores available to this process: {affinity}", flush=True)
+    if args.workers > affinity:
+        print(f"WARNING: workers={args.workers} > {affinity} available cores; "
+              f"workers will share cores and run slower. "
+              f"Consider --workers {affinity}.", flush=True)
 
     tasks = [
         (g, args.seed, args.white, args.black, args.max_plies, args.teacher, args.label_all)
@@ -94,9 +109,12 @@ def main():
         return f"plies={stats['plies']} labeled={stats['labeled']}"
 
     if args.workers <= 1:
+        print("running single-process (workers<=1)", flush=True)
         it = map(gen_one, tasks)
     else:
-        pool = get_context("spawn").Pool(args.workers)
+        print(f"starting pool of {args.workers} workers (spawn, ~5-20s startup, "
+              f"first games finish in ~30-60s)", flush=True)
+        pool = get_context("spawn").Pool(args.workers, initializer=_init)
         it = pool.imap_unordered(gen_one, tasks, chunksize=1)
     for g in progress_iter(it, len(tasks), "gen", every=args.log_every, extra=status):
         games.append(g)

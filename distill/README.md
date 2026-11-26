@@ -47,6 +47,17 @@ top-3 tokens — the fixed 3-attempt inference then plays it if legal),
 `legal_top3`. If `top1` plateaus at a low value while you add data, the
 1M-parameter capacity binds; stop scaling data and focus on legality/DAgger.
 
+## Progress and error visibility
+
+- All collection scripts (`gen_labels.py`, `dagger.py`, `agreement.py`,
+  `eval_paired.py`) print a progress line every `--log_every` items with
+  elapsed time, ETA and running stats (labeled positions, running score per
+  opponent level, fallback counts). `--verbose` prints one line per game.
+- `train_sft.py` prints loss components every `--log_every` steps (default 20)
+  plus per-epoch dev agreement; per-file game/label counts are printed at load.
+- Worker crashes are re-raised with the exact task/game attached
+  (`worker failed on task (...)`), instead of a bare traceback.
+
 ## What to watch
 
 - `dev top1` during training: the single best capacity/progress signal.
