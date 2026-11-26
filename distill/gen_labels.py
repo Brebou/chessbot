@@ -32,7 +32,14 @@ sys.path.insert(0, str(ROOT))
 from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 
-from distill.common import engine_move, progress_iter, replay_targets, wrap_task_errors  # noqa: E402
+from distill.common import (
+    default_workers,
+    distinct_openings,
+    engine_move,
+    progress_iter,
+    replay_targets,
+    wrap_task_errors,
+)  # noqa: E402
 
 
 def _init():
@@ -45,10 +52,9 @@ def _init():
 
 
 def _gen_one_impl(task):
-    gi, seed, white_level, black_level, max_plies, teacher_level, label_all, qdepth = task
+    gi, oid, seed, white_level, black_level, max_plies, teacher_level, label_all, qdepth = task
     rng = random.Random(f"gen-{seed}-{gi}")
-    book = load_openings()
-    opening = book[rng.randrange(len(book))]
+    opening = load_openings()[oid]
     board = chess.Board()
     for u in opening:
         board.push_uci(u)
@@ -93,7 +99,7 @@ def main():
     ap.add_argument("--max_plies", type=int, default=200)
     ap.add_argument("--qdepth", type=int, default=4,
                     help="quiescence depth of the engines (lower = faster, slightly weaker labels)")
-    ap.add_argument("--workers", type=int, default=max(1, __import__("os").cpu_count() - 1))
+    ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--out", default="work/games_sft.pkl")
     ap.add_argument("--resume", action="store_true",
                     help="skip games already present in --out (same --seed/--n_games required)")
@@ -126,8 +132,9 @@ def main():
         print(f"resume: {len(games)} games already in {out}, skipping them", flush=True)
     elif args.resume:
         print("resume: no existing checkpoint found, starting fresh", flush=True)
+    oids = distinct_openings(args.n_games, args.seed)
     tasks = [
-        (g, args.seed, args.white, args.black, args.max_plies, args.teacher, args.label_all, args.qdepth)
+        (g, oids[g], args.seed, args.white, args.black, args.max_plies, args.teacher, args.label_all, args.qdepth)
         for g in range(args.n_games) if g not in done
     ]
     t0 = time.time()

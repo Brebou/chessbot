@@ -23,6 +23,7 @@ import chess
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from distill.common import default_workers  # noqa: E402
 from chess_hw.match import (  # noqa: E402
     _engine_task,
     load_openings,
@@ -74,7 +75,7 @@ def main():
     ap.add_argument("--seed", type=int, default=777)
     ap.add_argument("--n_openings", type=int, default=100)
     ap.add_argument("--levels", nargs="+", type=int, default=[1, 2, 3])
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--log_every", type=int, default=25)
     ap.add_argument("--verbose", action="store_true", help="print one line per game")
     ap.add_argument("--out", default=None, help="optional json output")

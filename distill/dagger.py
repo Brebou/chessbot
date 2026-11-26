@@ -36,7 +36,13 @@ from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 from chess_hw.play import ModelPlayer  # noqa: E402
 
-from distill.common import progress_iter, replay_targets, wrap_task_errors  # noqa: E402
+from distill.common import (
+    default_workers,
+    distinct_openings,
+    progress_iter,
+    replay_targets,
+    wrap_task_errors,
+)  # noqa: E402
 from distill.train_sft import Lichess, load_games, train_model  # noqa: E402
 from chess_hw.match import score_for  # noqa: E402
 
@@ -52,10 +58,9 @@ def _init(path):
 
 
 def _dagger_one_impl(task):
-    gi, seed, opps, max_plies, teacher_level = task
+    gi, oid, seed, opps, max_plies, teacher_level = task
     rng = random.Random(f"dagger-{seed}-{gi}")
-    book = load_openings()
-    opening = book[rng.randrange(len(book))]
+    opening = load_openings()[oid]
     board = chess.Board()
     for u in opening:
         board.push_uci(u)
@@ -100,7 +105,8 @@ def _dagger_one(task):
 
 
 def collect(model_path, n_games, seed, opps, max_plies, teacher_level, workers, log_every=20, verbose=False):
-    tasks = [(g, seed, opps, max_plies, teacher_level) for g in range(n_games)]
+    oids = distinct_openings(n_games, seed)
+    tasks = [(g, oids[g], seed, opps, max_plies, teacher_level) for g in range(n_games)]
     results = []
     agg = {}
 
@@ -146,7 +152,7 @@ def main():
     ap.add_argument("--teacher", type=int, default=3)
     ap.add_argument("--label_all", action="store_true")
     ap.add_argument("--max_plies", type=int, default=200)
-    ap.add_argument("--workers", type=int, default=max(1, __import__("os").cpu_count() - 1))
+    ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--log_every", type=int, default=20)
     ap.add_argument("--verbose", action="store_true", help="print one line per played game")
     ap.add_argument("--init", default=str(ROOT / "base_model"))

@@ -33,6 +33,27 @@ LABEL_FROM = 8
 LEVELS = (1, 2, 3, 4)
 
 
+def default_workers() -> int:
+    """Usable CPU count: cgroup quota (v2 then v1) capped by os.cpu_count."""
+    import os
+
+    ncpu = os.cpu_count() or 2
+    try:
+        parts = open("/sys/fs/cgroup/cpu.max").read().split()
+        if parts[0] != "max":
+            return max(1, min(int(parts[0]) // int(parts[1]), ncpu))
+    except Exception:
+        pass
+    try:
+        q = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+        p = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        if q > 0:
+            return max(1, min(q // p, ncpu))
+    except Exception:
+        pass
+    return max(1, ncpu - 1)
+
+
 def make_engine(level: int) -> Engine:
     return Engine(level=level)
 
@@ -45,6 +66,19 @@ def engine_move(board: chess.Board, level: int, rng: random.Random, qdepth: int 
 
 def open_from_book(rng: random.Random) -> List[str]:
     return list(load_openings()[rng.randrange(len(load_openings()))])
+
+
+def distinct_openings(n: int, seed) -> List[int]:
+    """n opening indices without replacement (deterministic given seed).
+
+    Both players in generated games are deterministic, so two tasks with the
+    same opening would produce identical games; avoid sampling duplicates.
+    """
+    book_n = len(load_openings())
+    base = list(range(book_n))
+    random.Random(f"distinct-openings-{seed}").shuffle(base)
+    reps = (n + book_n - 1) // book_n
+    return (base * reps)[:n]
 
 
 def replay_targets(
