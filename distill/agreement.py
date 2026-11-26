@@ -16,6 +16,7 @@ If top1 plateaus at a low value while data scales, the 1M capacity binds.
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 import time
@@ -73,6 +74,7 @@ def main():
     if args.workers <= 1:
         it = map(probe_positions, tasks)
     else:
+        print(f"starting pool of {args.workers} workers", flush=True)
         pool = get_context("spawn").Pool(args.workers)
         it = pool.imap_unordered(probe_positions, tasks, chunksize=1)
     per_game = []

@@ -37,10 +37,10 @@ def make_engine(level: int) -> Engine:
     return Engine(level=level)
 
 
-def engine_move(board: chess.Board, level: int, rng: random.Random) -> chess.Move:
+def engine_move(board: chess.Board, level: int, rng: random.Random, qdepth: int = 4) -> chess.Move:
     if level == 0:
         return rng.choice(sorted(board.legal_moves, key=lambda m: m.uci()))
-    return Engine(level=level).best_move(board)
+    return Engine(level=level, qdepth=qdepth).best_move(board)
 
 
 def open_from_book(rng: random.Random) -> List[str]:
@@ -86,11 +86,15 @@ def replay_targets(
 
 
 def progress_iter(iterable, total: int, desc: str, every: int = 10, extra=None):
-    """Yield items while printing progress lines with rate and ETA."""
+    """Yield items while printing progress lines with rate and ETA.
+
+    Prints after each of the first 3 items, then every `every` items, so
+    slow workers are visible immediately.
+    """
     t0 = time.time()
     for done, item in enumerate(iterable, start=1):
         yield item
-        if done % every == 0 or done == total:
+        if done <= 3 or done % every == 0 or done == total:
             dt = time.time() - t0
             eta = dt / done * (total - done)
             line = f"[{desc}] {done}/{total} ({dt:.0f}s elapsed, ~{eta:.0f}s left)"
