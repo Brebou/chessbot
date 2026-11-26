@@ -94,7 +94,8 @@ class TournamentResults:
         self.standings: List[dict] = rr.get("standings", [])
         self.pairs: List[dict] = rr.get("pairs", [])
 
-        self.names: Dict[str, str] = {}        self.ranks: Dict[str, int] = {}
+        self.names: Dict[str, str] = {}
+        self.ranks: Dict[str, int] = {}
         self.scores: Dict[str, Optional[float]] = {}
         for row in self.standings:
             sid = row.get("id")
