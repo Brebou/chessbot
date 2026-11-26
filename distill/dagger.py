@@ -35,8 +35,9 @@ from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 from chess_hw.play import ModelPlayer  # noqa: E402
 
-from distill.common import replay_targets  # noqa: E402
+from distill.common import progress_iter, replay_targets, wrap_task_errors  # noqa: E402
 from distill.train_sft import Lichess, load_games, train_model  # noqa: E402
+from chess_hw.match import score_for  # noqa: E402
 
 _M = {}
 
@@ -46,7 +47,7 @@ def _init(path):
     _M["p"] = ModelPlayer(load_model(path))
 
 
-def _dagger_one(task):
+def _dagger_one_impl(task):
     gi, seed, opps, max_plies, teacher_level = task
     rng = random.Random(f"dagger-{seed}-{gi}")
     book = load_openings()
@@ -56,13 +57,20 @@ def _dagger_one(task):
         board.push_uci(u)
     color = rng.random() < 0.5
     opp_level = rng.choice(opps)
+    fallbacks = 0
     while not board.is_game_over(claim_draw=True) and board.ply() < max_plies:
         if board.turn == color:
-            mv = _M["p"].choose(board).move or rng.choice(sorted(board.legal_moves, key=lambda m: m.uci()))
+            mv = _M["p"].choose(board).move
+            if mv is None:
+                fallbacks += 1
+                mv = rng.choice(sorted(board.legal_moves, key=lambda m: m.uci()))
         else:
             mv = Engine(level=opp_level).best_move(board)
         board.push(mv)
     moves = [m.uci() for m in board.move_stack]
+    outcome = board.outcome(claim_draw=True)
+    result = outcome.result() if outcome is not None else "1/2-1/2"
+    termination = outcome.termination.name.lower() if outcome is not None else "max_plies"
     white_lvl = 0 if color == chess.WHITE else opp_level
     black_lvl = opp_level if color == chess.WHITE else 0
     ids, legal, teach = replay_targets(
@@ -71,15 +79,54 @@ def _dagger_one(task):
         label_model_plies_only=color,
         teacher_plied_levels=(white_lvl, black_lvl),
     )
-    return ids, legal, teach, {"opp_level": opp_level, "color": "white" if color else "black"}
+    return ids, legal, teach, {
+        "opp_level": opp_level,
+        "color": "white" if color else "black",
+        "result": result,
+        "termination": termination,
+        "plies": len(moves),
+        "fallbacks": fallbacks,
+        "score": score_for(result, color),
+        "labeled": int((teach >= 0).sum()),
+    }
 
 
-def collect(model_path, n_games, seed, opps, max_plies, teacher_level, workers):
+def _dagger_one(task):
+    return wrap_task_errors(_dagger_one_impl, task)
+
+
+def collect(model_path, n_games, seed, opps, max_plies, teacher_level, workers, log_every=20, verbose=False):
     tasks = [(g, seed, opps, max_plies, teacher_level) for g in range(n_games)]
+    results = []
+    agg = {}
+
+    def status():
+        parts = []
+        for lvl, a in sorted(agg.items()):
+            parts.append(f"L{lvl}: {a['n']} games, score {a['s'] / max(a['n'], 1):.2f}, "
+                         f"fb {a['fb']} / {a['plies']} model plies")
+        return " | ".join(parts) or "no games yet"
+
     if workers <= 1:
-        return [_dagger_one(t) for t in tasks]
-    with get_context("spawn").Pool(workers, initializer=_init, initargs=(str(model_path),)) as pool:
-        return pool.map(_dagger_one, tasks, chunksize=2)
+        it = map(_dagger_one, tasks)
+    else:
+        pool = get_context("spawn").Pool(workers, initializer=_init, initargs=(str(model_path),))
+        it = pool.imap_unordered(_dagger_one, tasks, chunksize=1)
+    for item in progress_iter(it, len(tasks), "dagger-collect", every=log_every, extra=status):
+        ids, legal, teach, meta = item
+        a = agg.setdefault(meta["opp_level"], {"n": 0, "s": 0.0, "plies": 0, "fb": 0})
+        a["n"] += 1
+        a["s"] += meta["score"]
+        a["plies"] += meta["plies"] // 2
+        a["fb"] += meta["fallbacks"]
+        if verbose:
+            print(f"  game {meta}", flush=True)
+        results.append((ids, legal, teach, meta))
+    if workers > 1:
+        pool.close()
+        pool.join()
+    print(f"collection done: {status()}", flush=True)
+    return results
 
 
 def main():
@@ -95,6 +142,8 @@ def main():
     ap.add_argument("--label_all", action="store_true")
     ap.add_argument("--max_plies", type=int, default=200)
     ap.add_argument("--workers", type=int, default=max(1, __import__("os").cpu_count() - 1))
+    ap.add_argument("--log_every", type=int, default=20)
+    ap.add_argument("--verbose", action="store_true", help="print one line per played game")
     ap.add_argument("--init", default=str(ROOT / "base_model"))
     ap.add_argument("--data", default=None)
     ap.add_argument("--epochs", type=int, default=6)
@@ -109,10 +158,15 @@ def main():
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
+    print(f"dagger: model={args.model} prev={args.prev} games={args.games} opps={args.opps} "
+          f"teacher=L{args.teacher} label_all={args.label_all} workers={args.workers} seed={args.seed}", flush=True)
     t0 = time.time()
-    new = collect(args.model, args.games, args.seed, args.opps, args.max_plies, args.teacher, args.workers)
+    new = collect(args.model, args.games, args.seed, args.opps, args.max_plies, args.teacher,
+                  args.workers, log_every=args.log_every, verbose=args.verbose)
     games = [(i, l, t) for (i, l, t, _) in new]
-    print(f"collected {len(games)} on-policy games ({time.time() - t0:.0f}s)", flush=True)
+    print(f"collected {len(games)} on-policy games, "
+          f"{sum(int((g[2] >= 0).sum()) for g in games)} new labeled positions "
+          f"({time.time() - t0:.0f}s)", flush=True)
     games_out = args.games_out or f"{args.out}_games.pkl"
     Path(games_out).parent.mkdir(parents=True, exist_ok=True)
     with open(games_out, "wb") as fh:

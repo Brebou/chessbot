@@ -56,8 +56,11 @@ def load_games(specs):
     games = []
     for f in files:
         with open(f, "rb") as fh:
-            games.extend(pickle.load(fh))
-    print(f"loaded {len(games)} games from {files}", flush=True)
+            part = pickle.load(fh)
+        n_lab = int(sum((g[2] >= 0).sum() for g in part))
+        print(f"  {f}: {len(part)} games, {sum(len(g[0]) - 1 for g in part)} plies, {n_lab} labeled", flush=True)
+        games.extend(part)
+    print(f"loaded {len(games)} games total from {len(files)} file(s)", flush=True)
     return games
 
 
@@ -88,6 +91,13 @@ def train_model(model, games, args, dev, lich=None, dev_games=None):
     model.train()
     best = (-1.0, None)
     order = list(range(len(games)))
+    steps_per_ep = (len(order) + args.bs - 1) // args.bs
+    total_steps = steps_per_ep * args.epochs
+    log_every = getattr(args, "log_every", 20)
+    print(f"training: {steps_per_ep} steps/epoch x {args.epochs} epochs = {total_steps} steps, "
+          f"bs={args.bs}, lr={args.lr}", flush=True)
+    step = 0
+    t_start = time.time()
     for ep in range(args.epochs):
         random.Random(args.seed + ep).shuffle(order)
         stats = np.zeros(3)
@@ -120,6 +130,15 @@ def train_model(model, games, args, dev, lich=None, dev_games=None):
             sched.step()
             stats += [l_legal.item(), l_ce.item(), l_rep.item()]
             nb += 1
+            step += 1
+            if step % log_every == 0 or step == total_steps:
+                dt = time.time() - t_start
+                loss_val = (args.lam_legal * stats[0] + args.lam_ce * stats[1]
+                            + args.lam_rep * stats[2]) / nb
+                print(f"  step {step}/{total_steps} (ep {ep}): loss {loss_val:.4f} "
+                      f"legal {stats[0] / nb:.4f} ce {stats[1] / nb:.4f} rep {stats[2] / nb:.4f} "
+                      f"lr {sched.get_last_lr()[0]:.2e} ({dt:.0f}s, {step * args.bs / max(dt, 1e-9):.0f} games/s)",
+                      flush=True)
         msg = (f"epoch {ep}: legal {stats[0] / nb:.4f} ce {stats[1] / nb:.4f} "
                f"replay {stats[2] / nb:.4f} ({time.time() - t0:.0f}s)")
         if dev_games:
@@ -151,6 +170,7 @@ def main():
     ap.add_argument("--dev_max", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--log_every", type=int, default=20, help="print train losses every N steps")
     args = ap.parse_args()
 
     dev = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -167,6 +187,7 @@ def main():
     print(f"train {len(train_games)} / dev {len(dev_games)} games", flush=True)
 
     model = load_model(args.init, device=dev)
+    print(f"device={dev}, params={model.num_parameters()}, init={args.init}", flush=True)
     train_model(model, train_games, args, dev, lich, dev_games)
     out = Path(args.out)
     save_model(model, out)
