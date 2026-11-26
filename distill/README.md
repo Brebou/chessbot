@@ -24,6 +24,22 @@ python distill/eval_paired.py --models base_model work/distill_r1 \
     --seed 777 --n_openings 100 --levels 1 2 3 --workers 8 --out work/eval_r1.json
 ```
 
+## Round 2b — GRPO (optional, on top of the distilled policy)
+
+```bash
+python distill/grpo.py --init work/distill_r2 --out work/grpo \
+    --iters 15 --games_per_iter 128 --group 8 --opps 1 2 --workers 15 --lr 1e-5
+```
+
+Samples legal moves at `--temp` from the current policy (cheap: ~2 ms/move),
+plays G games per (opening, color, opponent) group, and takes one gradient
+step per iteration on group-normalized game rewards with a KL anchor to the
+base model. Keep opponents at L1/L2 (L3 rollouts are ~15x slower). Expect a
+sharpening effect on top of distillation, not a replacement for it: the
+signal is sparse (win/draw/loss) and transfer from L1/L2 opponents to L3 is
+partial. Watch the per-iteration `reward L1/L2` trend; snapshots are saved
+every `--save_every` iterations.
+
 ## Round 2 — DAgger (fixes distribution shift + forgetting)
 
 ```bash
