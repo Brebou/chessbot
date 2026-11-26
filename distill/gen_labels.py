@@ -31,16 +31,14 @@ sys.path.insert(0, str(ROOT))
 from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 
-from distill.common import engine_move, replay_targets  # noqa: E402
-
-_M = {}
+from distill.common import engine_move, progress_iter, replay_targets, wrap_task_errors  # noqa: E402
 
 
 def _init():
     pass
 
 
-def gen_one(task):
+def _gen_one_impl(task):
     gi, seed, white_level, black_level, max_plies, teacher_level, label_all = task
     rng = random.Random(f"gen-{seed}-{gi}")
     book = load_openings()
@@ -61,6 +59,10 @@ def gen_one(task):
     return ids, legal, teach
 
 
+def gen_one(task):
+    return wrap_task_errors(_gen_one_impl, task)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n_games", type=int, default=2000)
@@ -73,20 +75,38 @@ def main():
     ap.add_argument("--max_plies", type=int, default=200)
     ap.add_argument("--workers", type=int, default=max(1, __import__("os").cpu_count() - 1))
     ap.add_argument("--out", default="work/games_sft.pkl")
+    ap.add_argument("--log_every", type=int, default=20,
+                    help="print a progress line every N games")
     args = ap.parse_args()
+    print(f"gen_labels: {args.n_games} games, white=L{args.white} black=L{args.black} "
+          f"teacher=L{args.teacher} label_all={args.label_all} max_plies={args.max_plies} "
+          f"workers={args.workers} seed={args.seed}", flush=True)
 
     tasks = [
         (g, args.seed, args.white, args.black, args.max_plies, args.teacher, args.label_all)
         for g in range(args.n_games)
     ]
     t0 = time.time()
+    games = []
+    stats = {"plies": 0, "labeled": 0}
+
+    def status():
+        return f"plies={stats['plies']} labeled={stats['labeled']}"
+
     if args.workers <= 1:
-        games = [gen_one(t) for t in tasks]
+        it = map(gen_one, tasks)
     else:
-        with get_context("spawn").Pool(args.workers) as pool:
-            games = pool.map(gen_one, tasks, chunksize=2)
-    n_plies = sum(len(g[0]) - 1 for g in games)
-    n_lab = int(sum((g[2] >= 0).sum() for g in games))
+        pool = get_context("spawn").Pool(args.workers)
+        it = pool.imap_unordered(gen_one, tasks, chunksize=1)
+    for g in progress_iter(it, len(tasks), "gen", every=args.log_every, extra=status):
+        games.append(g)
+        stats["plies"] += len(g[0]) - 1
+        stats["labeled"] += int((g[2] >= 0).sum())
+    if args.workers > 1:
+        pool.close()
+        pool.join()
+    n_plies = stats["plies"]
+    n_lab = stats["labeled"]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:

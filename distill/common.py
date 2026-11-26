@@ -17,6 +17,7 @@ only produced for t >= LABEL_FROM.
 from __future__ import annotations
 
 import random
+import time
 from typing import List, Optional, Sequence, Tuple
 
 import chess
@@ -82,6 +83,28 @@ def replay_targets(
         b.push_uci(u)
     ids = np.array(TOK.encode(moves), dtype=np.int64)
     return ids, legal, np.array(teach, dtype=np.int64)
+
+
+def progress_iter(iterable, total: int, desc: str, every: int = 10, extra=None):
+    """Yield items while printing progress lines with rate and ETA."""
+    t0 = time.time()
+    for done, item in enumerate(iterable, start=1):
+        yield item
+        if done % every == 0 or done == total:
+            dt = time.time() - t0
+            eta = dt / done * (total - done)
+            line = f"[{desc}] {done}/{total} ({dt:.0f}s elapsed, ~{eta:.0f}s left)"
+            if extra is not None:
+                line += f" | {extra()}"
+            print(line, flush=True)
+
+
+def wrap_task_errors(fn, task):
+    """Call fn(task) and re-raise exceptions with the task attached."""
+    try:
+        return fn(task)
+    except Exception as e:
+        raise RuntimeError(f"worker failed on task {task}: {type(e).__name__}: {e}") from e
 
 
 def game_batch(games, dev, label_from: int = LABEL_FROM):

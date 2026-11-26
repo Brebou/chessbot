@@ -33,6 +33,8 @@ from chess_hw import ChessTokenizer, load_model  # noqa: E402
 from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 
+from distill.common import progress_iter  # noqa: E402
+
 TOK = ChessTokenizer()
 
 
@@ -63,21 +65,34 @@ def main():
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
+    print(f"agreement: model={args.model}, {args.n_games} probe games, seed={args.seed}, "
+          f"workers={args.workers}, device will be "
+          f"{args.device or ('cuda' if torch.cuda.is_available() else 'cpu')}", flush=True)
     t0 = time.time()
     tasks = [(g, args.seed, args.max_plies) for g in range(args.n_games)]
     if args.workers <= 1:
-        per_game = [probe_positions(t) for t in tasks]
+        it = map(probe_positions, tasks)
     else:
-        with get_context("spawn").Pool(args.workers) as pool:
-            per_game = pool.map(probe_positions, tasks, chunksize=1)
+        pool = get_context("spawn").Pool(args.workers)
+        it = pool.imap_unordered(probe_positions, tasks, chunksize=1)
+    per_game = []
+    for g in progress_iter(it, len(tasks), "probe-gen", every=max(1, args.n_games // 10)):
+        per_game.append(g)
+    if args.workers > 1:
+        pool.close()
+        pool.join()
     positions = [p for g in per_game for p in g]
     print(f"{len(positions)} probe positions ({time.time() - t0:.0f}s)", flush=True)
 
     dev = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(args.model, device=dev).eval()
     n = top1 = top3 = legal3 = 0
+    t0 = time.time()
     with torch.inference_mode():
         for s in range(0, len(positions), args.bs):
+            if s % (args.bs * 10) == 0:
+                print(f"  scoring {s}/{len(positions)} positions "
+                      f"({time.time() - t0:.0f}s)", flush=True)
             chunk = positions[s:s + args.bs]
             T = max(len(h) for h, _ in chunk) + 1
             x = torch.zeros(len(chunk), T, dtype=torch.long)
