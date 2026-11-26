@@ -43,6 +43,13 @@ def load_model(path, device="cpu"):
     # The repo's real loader: dir containing model.safetensors, or the file itself.
     # Returns a ChessGPT (forward(input_ids) -> plain (B,T,V) logits tensor).
     from chess_hw.model import load_model as _hw_load
+    p = Path(path)
+    if not (p.exists() and ((p / "model.safetensors").exists() if p.is_dir()
+                            else p.suffix == ".safetensors")):
+        raise FileNotFoundError(
+            f"{path}: no model.safetensors here. A training run that writes this "
+            f"path must have COMPLETED first (plan/train saves <out>/last/ at every "
+            f"epoch end); check the training run's output/exit status before loading.")
     return _hw_load(path, device=device).eval(), load_vocab(path)
 
 
