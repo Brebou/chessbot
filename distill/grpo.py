@@ -183,9 +183,13 @@ def main():
         opt.zero_grad()
         total_moves = 0
         loss_sum = 0.0
+        n_enc = n_pun = n_dead = 0
         for g, eps in by_grp.items():
             r = np.array([e["reward"] for e in eps])
             adv = (r - r.mean()) / (r.std() + 1e-4)
+            n_enc += int((adv > 1e-6).sum())
+            n_pun += int((adv < -1e-6).sum())
+            n_dead += int((np.abs(adv) <= 1e-6).sum())
             counts = [len(e["positions"]) for e in eps]
             adv_move = torch.cat([
                 torch.full((c,), float(a), dtype=torch.float32)
@@ -215,7 +219,9 @@ def main():
             ends[e["termination"]] = ends.get(e["termination"], 0) + 1
 
         print(f"iter {it}: reward {rewards.mean():.3f} ({opp_msg}) loss {loss_sum:.4f} "
-              f"moves {total_moves} ends {ends} {div_msg} | roll {t_roll:.0f}s train {t_train:.0f}s",
+              f"moves {total_moves} ends {ends} {div_msg} "
+              f"adv +{n_enc}/-{n_pun}/={n_dead} (encouraged/punished/no-signal games) "
+              f"| roll {t_roll:.0f}s train {t_train:.0f}s",
               flush=True)
 
         if (it + 1) % args.save_every == 0 or it == args.iters - 1:
