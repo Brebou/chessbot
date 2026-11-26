@@ -21,7 +21,7 @@ def main():
     for _ in range(40):
         u, r = choose_move(model, v, b, hist, "cpu")
         if u is None:
-            print("model forfeited at ply", len(hist)); break
+            print("no legal move in top-3 at ply", len(hist), "(judge would play a random legal move)"); break
         b.push_uci(u); hist.append(v.move2id[u])
     print(f"model played {len(hist)} plies in {time.time()-t0:.2f}s (~{(time.time()-t0)/max(1,len(hist))*1000:.0f} ms/move)")
     t0 = time.time(); mv = engine_move(chess.Board(), 2)

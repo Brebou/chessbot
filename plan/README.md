@@ -55,3 +55,18 @@ for the real numbers; `play.py` is for development.
 - Knobs if offline metric improves but games don't: raise `--opp-weight 0` (only our-side positions),
   `--temp 30` (sharper targets), more DAgger rounds, add beam shards.
 - Hold out openings: never collect train and eval with the same --seed (or the same book lines).
+
+## Update: legality (judge plays a RANDOM LEGAL move when top-3 are all illegal; no forfeit)
+NOTE: earlier play.py treated this as a forfeit (wrong, fixed). Re-measure everything; old numbers are void.
+A random move is usually a blunder, so legality still helps, but expect a smaller effect than first claimed.
+Watch `RANDOM moves/game` in play.py output.
+- Pass the real book: `--openings <book file>` to play.py/beam.py. Random openings are off-distribution.
+- Add legal labels to existing shards (no Stockfish, ~1-2 min), then train with the legality loss:
+```bash
+python -m plan.addlegal data/r1/shards data/r2/shards
+python -m plan.train --data data/r2/shards data/r1/shards --init base_model --out out/r2L \
+       --epochs 20 --lr 2e-4 --val-frac 0.05 --legal-weight 1.0 --device cuda
+```
+- Training prints `illegal_top3` = share of positions where all 3 top tokens are illegal (= forfeit rate per move).
+  It should fall by a large factor. Free extra data for it: `label.py --mode legal` on any games (e.g. 50k games).
+- Compare to base on IDENTICAL cells: run base first with the same --seed/--n-openings/--openings and pass --baseline.

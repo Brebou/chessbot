@@ -2,6 +2,7 @@
 
   sf mode       : Stockfish multipv soft targets on every ply (the core of the plan)
   winmoves mode : one-hot on OUR moves in won games (for beam.py output)
+  legal mode    : no Stockfish, only legal-move labels (w=0): free data for the legality loss
 
   python -m plan.label --games data/r1/games.jsonl --out data/r1/shards --mode sf --depth 8
   python -m plan.label --games data/beam/wins.jsonl --out data/beam/shards --mode winmoves
@@ -11,7 +12,7 @@ Row t describes the position AFTER t moves (input position t predicts move t+1).
 """
 import argparse, json, multiprocessing as mp, os, time
 import numpy as np, torch, chess, chess.engine
-from plan.common import load_vocab, open_sf
+from plan.common import legal_arrays, load_vocab, open_sf
 
 _S = {}
 MAXK = 255
@@ -36,7 +37,7 @@ def _label(g):
         if _S["mode"] == "winmoves":
             if o:
                 idx[t, 0] = ids[t]; p[t, 0] = 1; w[t] = 1
-        elif t >= _S["skip"] and (o or _S["oppw"] > 0) and board.legal_moves.count() > 1:
+        elif _S["mode"] == "sf" and t >= _S["skip"] and (o or _S["oppw"] > 0) and board.legal_moves.count() > 1:
             info = _S["sf"].analyse(board, chess.engine.Limit(depth=_S["depth"]), multipv=K)
             mv, sc = [], []
             for i in info:
@@ -51,13 +52,14 @@ def _label(g):
                 idx[t, :n] = [mv[j] for j in keep]; p[t, :n] = pr; cp[t, :n] = sc_a
                 w[t] = 1.0 if o else _S["oppw"]
         board.push_uci(u)
-    return dict(ids=ids, idx=idx, p=p, cp=cp, w=w, ours=ours)
+    lf, lo = legal_arrays(moves, v)
+    return dict(ids=ids, idx=idx, p=p, cp=cp, w=w, ours=ours, lg_flat=lf, lg_off=lo)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", nargs="+", required=True); ap.add_argument("--out", required=True)
-    ap.add_argument("--mode", choices=["sf", "winmoves"], default="sf")
+    ap.add_argument("--mode", choices=["sf", "winmoves", "legal"], default="sf")
     ap.add_argument("--model-dir", default="base_model", help="only for the vocab")
     ap.add_argument("--depth", type=int, default=8); ap.add_argument("--multipv", type=int, default=5)
     ap.add_argument("--temp", type=float, default=60.0, help="centipawn softmax temperature")

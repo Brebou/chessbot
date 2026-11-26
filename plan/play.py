@@ -6,7 +6,7 @@
         --seed 1 --save data/r1/games.jsonl                                           # collection
 Paired delta vs an earlier run:  --baseline results/base.jsonl
 """
-import argparse, json, math, multiprocessing as mp
+import argparse, json, math, multiprocessing as mp, random
 from collections import Counter, defaultdict
 
 import chess, torch
@@ -26,7 +26,9 @@ def play_game(model, vocab, device, opening, opp, our_color, opp_model=None):
     board = chess.Board(); hist = []
     for u in opening:
         board.push_uci(u); hist.append(vocab.move2id[u])
-    fallbacks = 0
+    fallbacks = randoms = 0
+    rng = random.Random(f"{opening}{our_color}")  # judge: no legal move in top-3 -> random legal move
+    rand_move = lambda: rng.choice(sorted(m.uci() for m in board.legal_moves))
     while True:
         st = status(board, our_color)
         if st:
@@ -34,18 +36,19 @@ def play_game(model, vocab, device, opening, opp, our_color, opp_model=None):
         if board.turn == our_color:
             u, r = choose_move(model, vocab, board, hist, device)
             if u is None:
-                result, reason = 0.0, "forfeit"; break
-            fallbacks += r > 0
+                u = rand_move(); randoms += 1
+            else:
+                fallbacks += r > 0
         elif opp_model is not None:
             u, _ = choose_move(opp_model, vocab, board, hist, device)
             if u is None:
-                result, reason = 1.0, "opp_forfeit"; break
+                u = rand_move()
         else:
             u = engine_move(board, int(opp[1:])).uci()
         board.push_uci(u); hist.append(vocab.move2id.get(u, 0))
     return dict(moves=[m.uci() for m in board.move_stack], opening=list(opening),
                 ours="w" if our_color == chess.WHITE else "b", opp=opp,
-                result=result, reason=reason, fallbacks=int(fallbacks))
+                result=result, reason=reason, fallbacks=int(fallbacks), randoms=randoms)
 
 
 def _run(task):
@@ -73,9 +76,9 @@ def summarize(games, baseline=None):
         sc = [g["result"] for g in gs]
         n = len(sc); mean = sum(sc) / n
         reasons = Counter((g["reason"], g["result"]) for g in gs)
-        fb = sum(g["fallbacks"] for g in gs) / n
+        fb = sum(g["fallbacks"] for g in gs) / n; rn = sum(g["randoms"] for g in gs) / n
         print(f"{opp:>14}: score {mean:.3f} (W{sum(s==1 for s in sc)} D{sum(s==.5 for s in sc)} "
-              f"L{sum(s==0 for s in sc)}, n={n})  fallbacks/game {fb:.1f}")
+              f"L{sum(s==0 for s in sc)}, n={n})  top1-illegal/game {fb:.1f}  RANDOM moves/game {rn:.2f}")
         print("                 endings:", dict(reasons))
         if opp.startswith("L"):
             tot.append(mean)

@@ -11,7 +11,7 @@ from plan.common import load_model, logits_of
 
 @torch.no_grad()
 def evaluate(model, vocab, games, dev):
-    R = dict(n=0, top1=0, intop=0, forfeit=0, fallback=0, loss=[], blunder=0, mate_avail=0, mate_hit=0)
+    R = dict(n=0, top1=0, intop=0, randmv=0, fallback=0, loss=[], blunder=0, mate_avail=0, mate_hit=0)
     for g in games:
         ids = torch.from_numpy(g["ids"].astype(np.int64)); k = len(ids)
         X = torch.cat([torch.tensor([vocab.bos]), ids[:-1]]).unsqueeze(0).to(dev)
@@ -30,7 +30,7 @@ def evaluate(model, vocab, games, dev):
                 cps = g["cp"][t][valid].astype(np.float64); idxs = g["idx"][t][valid]
                 best = cps.max(); R["n"] += 1
                 if ch is None:
-                    R["forfeit"] += 1; loss = 1000.0
+                    R["randmv"] += 1; loss = 1000.0  # random legal move: treated as a blunder
                 else:
                     R["fallback"] += rank > 0
                     R["top1"] += ch == idxs[0]; R["intop"] += ch in idxs
@@ -42,7 +42,7 @@ def evaluate(model, vocab, games, dev):
     n = max(R["n"], 1)
     return {"positions": R["n"], "sf_top1_match": R["top1"] / n, "in_sf_top5": R["intop"] / n,
             "mean_cp_loss_lb": float(np.mean(R["loss"])), "blunder_rate(>=200cp)": R["blunder"] / n,
-            "forfeit_rate": R["forfeit"] / n, "top1_illegal_rate": R["fallback"] / n,
+            "random_move_rate": R["randmv"] / n, "top1_illegal_rate": R["fallback"] / n,
             "mate_hit": R["mate_hit"] / max(R["mate_avail"], 1), "mate_positions": R["mate_avail"]}
 
 
