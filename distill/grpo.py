@@ -133,7 +133,7 @@ def main():
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
-    from distill.common import default_workers
+    from distill.common import default_workers, distinct_openings
 
     workers = args.workers or default_workers()
     dev = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -157,8 +157,9 @@ def main():
     for it in range(args.iters):
         t0 = time.time()
         groups = []
+        oids = distinct_openings(n_groups, (args.seed, it))
         for g in range(n_groups):
-            gi = rng.randrange(len(book))
+            gi = oids[g]
             color = rng.random() < 0.5
             opp = rng.choice(args.opps)
             groups.append([(g, j, gi, args.seed * 1_000_003 + it * 100_003 + g * 1009 + j,
@@ -172,6 +173,10 @@ def main():
         by_grp = {}
         for e in results:
             by_grp.setdefault(e["grp"], []).append(e)
+        div = [len({e["ids"].tobytes() for e in eps}) for eps in by_grp.values()]
+        div_msg = f"distinct games/group {np.mean(div):.1f}/{args.group}"
+        if min(div) == 1:
+            div_msg += " WARNING: some groups played identical games, raise --temp"
         t_roll = time.time() - t0
 
         model.train()
@@ -210,7 +215,7 @@ def main():
             ends[e["termination"]] = ends.get(e["termination"], 0) + 1
 
         print(f"iter {it}: reward {rewards.mean():.3f} ({opp_msg}) loss {loss_sum:.4f} "
-              f"moves {total_moves} ends {ends} | roll {t_roll:.0f}s train {t_train:.0f}s",
+              f"moves {total_moves} ends {ends} {div_msg} | roll {t_roll:.0f}s train {t_train:.0f}s",
               flush=True)
 
         if (it + 1) % args.save_every == 0 or it == args.iters - 1:

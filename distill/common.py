@@ -68,6 +68,19 @@ def open_from_book(rng: random.Random) -> List[str]:
     return list(load_openings()[rng.randrange(len(load_openings()))])
 
 
+def distinct_openings(n: int, seed) -> List[int]:
+    """n opening indices without replacement (deterministic given seed).
+
+    Both players in generated games are deterministic, so two tasks with the
+    same opening would produce identical games; avoid sampling duplicates.
+    """
+    book_n = len(load_openings())
+    base = list(range(book_n))
+    random.Random(f"distinct-openings-{seed}").shuffle(base)
+    reps = (n + book_n - 1) // book_n
+    return (base * reps)[:n]
+
+
 def replay_targets(
     moves: Sequence[str],
     teacher_level: int,
