@@ -123,6 +123,7 @@ def main():
         if val:
             print("ep %d val (EMA): ce %.4f top1 %.4f" % ((ep,) + validate(ema, val, vocab.bos, K, dev)))
         save_checkpoint(ema, a.base, f"{a.out}/ep{ep+1}"); save_checkpoint(ema, a.base, f"{a.out}/last")
+        print(f"saved {a.out}/ep{ep+1} and {a.out}/last", flush=True)
         if step >= total:
             break
 
