@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 
-from distill.common import engine_move, progress_iter, replay_targets, wrap_task_errors  # noqa: E402
+from distill.common import default_workers, engine_move, progress_iter, replay_targets, wrap_task_errors  # noqa: E402
 
 
 def _init():
@@ -93,7 +93,7 @@ def main():
     ap.add_argument("--max_plies", type=int, default=200)
     ap.add_argument("--qdepth", type=int, default=4,
                     help="quiescence depth of the engines (lower = faster, slightly weaker labels)")
-    ap.add_argument("--workers", type=int, default=max(1, __import__("os").cpu_count() - 1))
+    ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--out", default="work/games_sft.pkl")
     ap.add_argument("--resume", action="store_true",
                     help="skip games already present in --out (same --seed/--n_games required)")

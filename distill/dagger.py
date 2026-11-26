@@ -36,7 +36,7 @@ from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 from chess_hw.play import ModelPlayer  # noqa: E402
 
-from distill.common import progress_iter, replay_targets, wrap_task_errors  # noqa: E402
+from distill.common import default_workers, progress_iter, replay_targets, wrap_task_errors  # noqa: E402
 from distill.train_sft import Lichess, load_games, train_model  # noqa: E402
 from chess_hw.match import score_for  # noqa: E402
 
@@ -146,7 +146,7 @@ def main():
     ap.add_argument("--teacher", type=int, default=3)
     ap.add_argument("--label_all", action="store_true")
     ap.add_argument("--max_plies", type=int, default=200)
-    ap.add_argument("--workers", type=int, default=max(1, __import__("os").cpu_count() - 1))
+    ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--log_every", type=int, default=20)
     ap.add_argument("--verbose", action="store_true", help="print one line per played game")
     ap.add_argument("--init", default=str(ROOT / "base_model"))

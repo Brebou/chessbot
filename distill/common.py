@@ -33,6 +33,27 @@ LABEL_FROM = 8
 LEVELS = (1, 2, 3, 4)
 
 
+def default_workers() -> int:
+    """Usable CPU count: cgroup quota (v2 then v1) capped by os.cpu_count."""
+    import os
+
+    ncpu = os.cpu_count() or 2
+    try:
+        parts = open("/sys/fs/cgroup/cpu.max").read().split()
+        if parts[0] != "max":
+            return max(1, min(int(parts[0]) // int(parts[1]), ncpu))
+    except Exception:
+        pass
+    try:
+        q = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+        p = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        if q > 0:
+            return max(1, min(q // p, ncpu))
+    except Exception:
+        pass
+    return max(1, ncpu - 1)
+
+
 def make_engine(level: int) -> Engine:
     return Engine(level=level)
 
