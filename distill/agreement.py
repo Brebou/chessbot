@@ -34,7 +34,7 @@ from chess_hw import ChessTokenizer, load_model  # noqa: E402
 from chess_hw.engine import Engine  # noqa: E402
 from chess_hw.match import load_openings  # noqa: E402
 
-from distill.common import progress_iter  # noqa: E402
+from distill.common import default_workers, progress_iter  # noqa: E402
 
 TOK = ChessTokenizer()
 
@@ -61,7 +61,7 @@ def main():
     ap.add_argument("--n_games", type=int, default=64)
     ap.add_argument("--seed", type=int, default=999)
     ap.add_argument("--max_plies", type=int, default=120)
-    ap.add_argument("--workers", type=int, default=max(1, __import__("os").cpu_count() - 1))
+    ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--bs", type=int, default=64)
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
