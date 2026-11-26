@@ -37,10 +37,10 @@ def make_engine(level: int) -> Engine:
     return Engine(level=level)
 
 
-def engine_move(board: chess.Board, level: int, rng: random.Random) -> chess.Move:
+def engine_move(board: chess.Board, level: int, rng: random.Random, qdepth: int = 4) -> chess.Move:
     if level == 0:
         return rng.choice(sorted(board.legal_moves, key=lambda m: m.uci()))
-    return Engine(level=level).best_move(board)
+    return Engine(level=level, qdepth=qdepth).best_move(board)
 
 
 def open_from_book(rng: random.Random) -> List[str]:
